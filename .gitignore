@@ -43,7 +43,10 @@ logs/
 
 # --- Sensitive local docs: schema, architecture, internal endpoints ---
 plans/
-db/
+# ignore all of db/ (migrations DDL, discover.sql) EXCEPT the smoke test.
+# NOTE: gitignore has no inline comments — keep these patterns on their own lines.
+db/*
+!db/smoke_test.py
 AI_LOCAL_NOTES.md
 LOCAL_SETUP.md
 
