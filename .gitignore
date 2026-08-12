@@ -1,11 +1,24 @@
 # ============================================================================
-# PUBLIC REPO — keep architecture, schema, endpoints, secrets, and session OUT.
-# When adding a new file, ask: does it reveal internal hosts/schema/auth? If yes,
-# it belongs in a gitignored path below. Verify with:  git status  before commit.
+# PUBLIC REPO — keep architecture, schema, endpoints, secrets, session, data OUT.
+# When adding a file, ask: does it reveal internal hosts/schema/auth? If yes, it belongs
+# in a gitignored path below. Verify with:  git status  before every commit.
 # ============================================================================
 
-# --- Dependencies ---
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Legacy Node (project ported to Python) ---
 node_modules/
+*.mjs
+package.json
+package-lock.json
 
 # --- Secrets & credentials (NEVER commit) ---
 .env
@@ -28,20 +41,11 @@ state/
 logs/
 *.log
 
-# --- Sensitive local docs: architecture, schema, internal endpoints ---
-# (kept LOCAL only; hand-applied on the target PC)
+# --- Sensitive local docs: schema, architecture, internal endpoints ---
 plans/
 db/
 AI_LOCAL_NOTES.md
 LOCAL_SETUP.md
-
-# --- Dev/probe scripts that embed raw endpoint details (keep local) ---
-check.mjs
-map.mjs
-scrape.mjs
-get-report.mjs
-fetch-stealth.mjs
-inspect-stream.mjs
 
 # --- OS / editor cruft ---
 .DS_Store
