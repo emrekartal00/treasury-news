@@ -4,6 +4,7 @@ Sets CURRENT_SCHEMA (from config.DB_SCHEMA / env DB_SCHEMA) after connecting, so
 queries stay unqualified while the tables live in a different schema (name from env). The
 connecting user still needs SELECT/INSERT/UPDATE/DELETE grants on those tables.
 """
+import json
 import os
 import re
 
@@ -15,6 +16,18 @@ import config  # loads .env; exposes DB_SCHEMA
 oracledb.defaults.fetch_lobs = False
 
 _IDENT = re.compile(r"^[A-Za-z0-9_$#]+$")
+
+
+def as_json(value):
+    """Decode a JSON column whether the driver returns bytes, str, or an already-parsed
+    object (this DB returns `BLOB ... IS JSON` columns pre-parsed)."""
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        return json.loads(value.decode("utf-8"))
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
 
 
 def connect():

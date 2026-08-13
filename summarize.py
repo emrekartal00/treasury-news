@@ -74,7 +74,7 @@ def pending(cur, limit):
 def store_summary(con, rid, data, tokens):
     cur = con.cursor()
     sj = json.dumps(data, ensure_ascii=False).encode("utf-8")
-    cur.setinputsizes(sj=oracledb.DB_TYPE_BLOB)
+    cur.setinputsizes(sj=oracledb.DB_TYPE_BLOB, hl=oracledb.DB_TYPE_NVARCHAR)
     cur.execute("""
         MERGE INTO report_summary t USING (SELECT :id AS report_id FROM dual) s
         ON (t.report_id = s.report_id)

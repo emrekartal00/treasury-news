@@ -78,8 +78,10 @@ def store(con, meta, html, pdf_bytes):
     authors_b = json.dumps(meta.get("authors") or [], ensure_ascii=False).encode("utf-8")
     rtypes_b = json.dumps(meta.get("reportTypes") or [], ensure_ascii=False).encode("utf-8")
 
-    # REPORTS - JSON columns are BLOB (UTF-8), synopsis is NCLOB.
-    cur.setinputsizes(authors=oracledb.DB_TYPE_BLOB, rtypes=oracledb.DB_TYPE_BLOB,
+    # REPORTS - NVARCHAR2 text must bind as national charset (else non-Latin chars are
+    # lost in transit through the single-byte DB charset); JSON is BLOB; synopsis NCLOB.
+    cur.setinputsizes(title=oracledb.DB_TYPE_NVARCHAR, headline=oracledb.DB_TYPE_NVARCHAR,
+                      authors=oracledb.DB_TYPE_BLOB, rtypes=oracledb.DB_TYPE_BLOB,
                       syn=oracledb.DB_TYPE_NCLOB)
     cur.execute("""
         MERGE INTO reports t USING (SELECT :id AS report_id FROM dual) s
@@ -100,8 +102,8 @@ def store(con, meta, html, pdf_bytes):
           "src": meta.get("htmlUrl"), "dl": meta.get("pdfUrl"),
           "pages": meta.get("totalPages"), "syn": meta.get("synopsis")})
 
-    # REPORT_TEXT - plain_text is a (potentially large) NCLOB.
-    cur.setinputsizes(pt=oracledb.DB_TYPE_NCLOB)
+    # REPORT_TEXT - plain_text NCLOB; search_key is NVARCHAR2 (bind as national charset).
+    cur.setinputsizes(pt=oracledb.DB_TYPE_NCLOB, sk=oracledb.DB_TYPE_NVARCHAR)
     cur.execute("""
         MERGE INTO report_text t USING (SELECT :id AS report_id FROM dual) s
         ON (t.report_id = s.report_id)

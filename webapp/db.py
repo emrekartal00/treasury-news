@@ -14,6 +14,17 @@ _IDENT = re.compile(r"^[A-Za-z0-9_$#]+$")
 _pool = None
 
 
+def as_json(value):
+    """Decode a JSON column whether it comes back as bytes, str, or already parsed."""
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        return json.loads(value.decode("utf-8"))
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
 def _schema():
     s = (os.environ.get("DB_SCHEMA") or "").strip()
     return s if s and _IDENT.match(s) else None
@@ -97,9 +108,9 @@ def get_report(rid):
     title, headline, authors_b, date, pages, src, dl, sj, has_pdf = rows[0]
     return {
         "id": rid, "title": title, "headline": headline,
-        "authors": json.loads(authors_b.decode("utf-8")) if authors_b else [],
+        "authors": as_json(authors_b) or [],
         "date": date, "pages": pages, "source": src, "download": dl,
-        "summary": json.loads(sj.decode("utf-8")) if sj else None,
+        "summary": as_json(sj),
         "has_pdf": bool(has_pdf),
     }
 
@@ -119,4 +130,4 @@ def get_digest(date_str):
                  {"d": date_str})
     if not rows or not rows[0][0]:
         return None
-    return json.loads(rows[0][0].decode("utf-8"))
+    return as_json(rows[0][0])

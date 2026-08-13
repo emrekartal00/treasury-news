@@ -35,8 +35,8 @@ def load_digest(cur, date_str):
     row = cur.fetchone()
     if not row:
         return None, []
-    overview = json.loads(row[0].decode("utf-8")) if row[0] else {}
-    report_ids = json.loads(row[1].decode("utf-8")) if row[1] else []
+    overview = db_conn.as_json(row[0]) or {}
+    report_ids = db_conn.as_json(row[1]) or []
     return overview, report_ids
 
 
@@ -52,9 +52,9 @@ def load_report(cur, rid):
     title, headline, authors_b, src, dl, sj = row
     return {
         "id": rid, "title": title, "headline": headline,
-        "authors": json.loads(authors_b.decode("utf-8")) if authors_b else [],
+        "authors": db_conn.as_json(authors_b) or [],
         "source": src, "download": dl,
-        "summary": json.loads(sj.decode("utf-8")) if sj else {},
+        "summary": db_conn.as_json(sj) or {},
     }
 
 
@@ -162,7 +162,7 @@ def main():
     recipients = os.environ.get("MAIL_TO", "")
     try:
         mid = send(subject, html, text)
-        cur.setinputsizes(rcpt=oracledb.DB_TYPE_NCLOB)
+        cur.setinputsizes(rcpt=oracledb.DB_TYPE_NCLOB, subj=oracledb.DB_TYPE_NVARCHAR)
         cur.execute("""
             INSERT INTO email_log (id, digest_date, subject, recipients, status, message_id, sent_at)
             VALUES (:id, TO_DATE(:d,'YYYY-MM-DD'), :subj, :rcpt, 'SENT', :mid, SYSTIMESTAMP)
@@ -171,7 +171,8 @@ def main():
         con.commit()
         print(f"Sent digest for {date_str} to {recipients} ({len(reports)} reports).")
     except Exception as exc:
-        cur.setinputsizes(err=oracledb.DB_TYPE_NCLOB, rcpt=oracledb.DB_TYPE_NCLOB)
+        cur.setinputsizes(err=oracledb.DB_TYPE_NCLOB, rcpt=oracledb.DB_TYPE_NCLOB,
+                          subj=oracledb.DB_TYPE_NVARCHAR)
         cur.execute("""
             INSERT INTO email_log (id, digest_date, subject, recipients, status, error, sent_at)
             VALUES (:id, TO_DATE(:d,'YYYY-MM-DD'), :subj, :rcpt, 'FAILED', :err, SYSTIMESTAMP)

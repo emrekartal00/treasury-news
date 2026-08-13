@@ -34,7 +34,7 @@ def build(con, date_str):
 
     items, report_ids, by_stance = [], [], {}
     for rid, title, sj in rows:
-        data = json.loads(sj.decode("utf-8")) if sj else {}
+        data = db_conn.as_json(sj) or {}
         stance = data.get("stance", "n/a")
         by_stance[stance] = by_stance.get(stance, 0) + 1
         items.append({"report_id": rid, "headline": data.get("headline") or title, "stance": stance})
