@@ -4,4 +4,5 @@ playwright>=1.40
 oracledb>=2.0
 requests>=2.31
 beautifulsoup4>=4.12   # HTML->text for ingest (stdlib html.parser backend; no C build)
+pywin32>=306 ; sys_platform == "win32"   # Outlook COM for mailer.py (Windows only)
 # selectolax>=0.3       # optional: faster parser; ingest uses it if present, else bs4

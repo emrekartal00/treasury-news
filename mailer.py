@@ -1,17 +1,17 @@
 """mailer.py - compose + send the daily digest email; idempotent via EMAIL_LOG.
 
 Loads DAILY_DIGEST for a date, renders an HTML email (overview + one card per report,
-with links to the web app), sends via SMTP, and records the result in EMAIL_LOG. Never
-double-sends a day (unless --force).
+with links to the web app), sends it through the LOCAL OUTLOOK desktop app via COM
+(pywin32) - no SMTP, sends as the logged-in Outlook/Exchange account - and records the
+result in EMAIL_LOG. Never double-sends a day (unless --force).
 
-Run:  python mailer.py [--date YYYY-MM-DD] [--force]
+Run:  python mailer.py [--date YYYY-MM-DD] [--force] [--preview]
+  --preview opens the mail in Outlook for review instead of sending.
 """
 import argparse
 import json
 import os
-import smtplib
 import uuid
-from email.message import EmailMessage
 
 import oracledb
 
@@ -94,48 +94,44 @@ def render(overview, reports, base_url):
     return "".join(html), "\n".join(text)
 
 
-def send(subject, html, text):
-    host = os.environ.get("SMTP_HOST")
-    port = int(os.environ.get("SMTP_PORT") or 587)
-    user = os.environ.get("SMTP_USER")
-    pw = os.environ.get("SMTP_PASS")
-    secure = str(os.environ.get("SMTP_SECURE", "")).lower() in ("1", "true", "yes")
-    mail_from = os.environ.get("MAIL_FROM")
+def send(subject, html, preview=False):
+    """Send via the local Outlook desktop app (COM / pywin32). Windows + Outlook only.
+    Sends as the logged-in Outlook/Exchange account - no SMTP credentials needed.
+    MAIL_FROM (optional) sends on behalf of a shared mailbox you have permission for."""
     to = os.environ.get("MAIL_TO")
     cc = os.environ.get("MAIL_CC")
-    if not host or not mail_from or not to:
-        raise RuntimeError("Set SMTP_HOST, MAIL_FROM, MAIL_TO in .env")
+    sender = os.environ.get("MAIL_FROM")
+    if not to:
+        raise RuntimeError("Set MAIL_TO in .env")
 
-    msg = EmailMessage()
-    msg["From"] = mail_from
-    msg["To"] = to
-    if cc:
-        msg["Cc"] = cc
-    msg["Subject"] = subject
-    msg.set_content(text)
-    msg.add_alternative(html, subtype="html")
-
-    srv = smtplib.SMTP_SSL(host, port, timeout=30) if secure else smtplib.SMTP(host, port, timeout=30)
     try:
-        srv.ehlo()
-        if not secure:
-            try:
-                srv.starttls()
-                srv.ehlo()
-            except Exception:
-                pass
-        if user:
-            srv.login(user, pw or "")
-        srv.send_message(msg)
-    finally:
-        srv.quit()
-    return msg.get("Message-ID") or ""
+        import pythoncom
+        pythoncom.CoInitialize()  # safe if already initialized; needed in some contexts
+    except Exception:
+        pass
+    import win32com.client  # pywin32
+
+    outlook = win32com.client.Dispatch("Outlook.Application")
+    mail = outlook.CreateItem(0)  # 0 = olMailItem
+    mail.To = to.replace(",", ";")   # Outlook separates recipients with ';'
+    if cc:
+        mail.CC = cc.replace(",", ";")
+    if sender:
+        mail.SentOnBehalfOfName = sender
+    mail.Subject = subject
+    mail.HTMLBody = html
+    if preview:
+        mail.Display(True)   # open in Outlook for review; does NOT send
+        return "displayed"
+    mail.Send()
+    return "outlook"
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--preview", action="store_true", help="open in Outlook instead of sending")
     args, _ = ap.parse_known_args()
 
     con = db_conn.connect()
@@ -161,13 +157,17 @@ def main():
     log_id = str(uuid.uuid4())
     recipients = os.environ.get("MAIL_TO", "")
     try:
-        mid = send(subject, html, text)
+        result = send(subject, html, preview=args.preview)
+        if args.preview:
+            print(f"Opened digest for {date_str} in Outlook for review (not sent).")
+            con.close()
+            return
         cur.setinputsizes(rcpt=oracledb.DB_TYPE_NCLOB, subj=oracledb.DB_TYPE_NVARCHAR)
         cur.execute("""
             INSERT INTO email_log (id, digest_date, subject, recipients, status, message_id, sent_at)
             VALUES (:id, TO_DATE(:d,'YYYY-MM-DD'), :subj, :rcpt, 'SENT', :mid, SYSTIMESTAMP)
         """, {"id": log_id, "d": date_str, "subj": subject[:500], "rcpt": recipients,
-              "mid": (mid or "")[:300]})
+              "mid": (result or "")[:300]})
         con.commit()
         print(f"Sent digest for {date_str} to {recipients} ({len(reports)} reports).")
     except Exception as exc:
