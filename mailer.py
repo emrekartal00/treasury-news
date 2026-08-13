@@ -62,36 +62,179 @@ def esc(s):
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def render(overview, reports, base_url):
-    date = overview.get("date", "")
-    n = overview.get("counts", {}).get("total", len(reports))
-    html = [f'<div style="font-family:Arial,Helvetica,sans-serif;max-width:720px">',
-            f"<h2>GS Research Digest - {esc(date)} - {n} report(s)</h2>"]
-    text = [f"GS Research Digest - {date} - {n} report(s)", ""]
-    for r in reports:
-        s = r["summary"]
-        link = f"{base_url}/reports/{r['id']}" if base_url else (r["source"] or "#")
-        pdf = f"{base_url}/reports/{r['id']}/pdf" if base_url else (r["download"] or "#")
-        title = r["title"] or r["headline"] or "(untitled)"
-        html.append(f"<h3 style='margin-bottom:2px'><a href='{esc(link)}'>{esc(title)}</a></h3>")
-        if r["authors"]:
-            html.append(f"<div style='color:#666;font-size:13px'>{esc(', '.join(r['authors']))}</div>")
-        if s.get("stance"):
-            html.append(f"<div style='font-size:12px;color:#888'>stance: {esc(s.get('stance'))}</div>")
-        if s.get("one_paragraph"):
-            html.append(f"<p>{esc(s['one_paragraph'])}</p>")
-        kps = s.get("key_points") or []
-        if kps:
-            html.append("<ul>" + "".join(f"<li>{esc(kp.get('point',''))}</li>" for kp in kps[:4]) + "</ul>")
-        html.append(f"<div><a href='{esc(link)}'>View report</a> &nbsp;|&nbsp; <a href='{esc(pdf)}'>PDF</a></div><hr>")
+# --- email styling (editorial research note; email-safe: tables + inline CSS + web-safe fonts) ---
+_INK = "#1c1c1a"
+_MUTED = "#6f6b64"
+_BODY = "#33322e"
+_HAIR = "#e6e3dc"
+_ACCENT = "#0b5f57"
+_CANVAS = "#f7f6f2"
+_CARD = "#ffffff"
+_SERIF = "Georgia,'Times New Roman',serif"
+_SANS = "Arial,Helvetica,sans-serif"
+_STANCE = {
+    "bullish": ("Bullish", "#1c6b45"),
+    "bearish": ("Bearish", "#9c2b2b"),
+    "neutral": ("Neutral", "#6f6b64"),
+    "mixed": ("Mixed", "#9a6a1c"),
+    "n/a": ("N/A", "#8a857c"),
+}
 
-        text.append(f"* {title}")
+
+def _badge(stance):
+    label, color = _STANCE.get((stance or "n/a").lower(), _STANCE["n/a"])
+    return (f'<span style="font-family:{_SANS};font-size:11px;font-weight:bold;'
+            f'letter-spacing:.08em;text-transform:uppercase;color:{color};'
+            f'border:1px solid {color};border-radius:3px;padding:2px 8px;white-space:nowrap;">'
+            f'{label}</span>')
+
+
+def _buttons(read_href, pdf_href):
+    cells = [f'<td bgcolor="{_ACCENT}" style="border-radius:4px;">'
+             f'<a href="{esc(read_href)}" style="display:inline-block;font-family:{_SANS};'
+             f'font-size:13px;font-weight:bold;color:#ffffff;text-decoration:none;'
+             f'padding:10px 18px;letter-spacing:.02em;">Read report &#8250;</a></td>']
+    if pdf_href:
+        cells.append('<td width="10" style="font-size:0;line-height:0;">&nbsp;</td>')
+        cells.append(f'<td bgcolor="{_CARD}" style="border:1px solid {_HAIR};border-radius:4px;">'
+                     f'<a href="{esc(pdf_href)}" style="display:inline-block;font-family:{_SANS};'
+                     f'font-size:13px;font-weight:bold;color:{_INK};text-decoration:none;'
+                     f'padding:10px 16px;">PDF</a></td>')
+    return ('<table role="presentation" cellpadding="0" cellspacing="0" border="0">'
+            f'<tr>{"".join(cells)}</tr></table>')
+
+
+def _key_points(kps):
+    rows = []
+    for kp in (kps or [])[:4]:
+        pt = esc(kp.get("point", "") if isinstance(kp, dict) else str(kp))
+        if not pt:
+            continue
+        rows.append(
+            f'<tr><td valign="top" width="18" style="font-family:{_SERIF};font-size:15px;'
+            f'line-height:1.55;color:{_ACCENT};">&#8212;</td>'
+            f'<td style="font-family:{_SANS};font-size:14px;line-height:1.55;color:{_BODY};'
+            f'padding-bottom:5px;">{pt}</td></tr>')
+    if not rows:
+        return ""
+    return ('<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" '
+            'style="margin-top:8px;">' + "".join(rows) + "</table>")
+
+
+def _card(r, base_url):
+    s = r.get("summary") or {}
+    rid = r["id"]
+    read = f"{base_url}/reports/{rid}" if base_url else (r.get("source") or "#")
+    if base_url:
+        pdf = f"{base_url}/reports/{rid}/pdf"
+    else:
+        pdf = r.get("download") or ""
+    title = esc(r.get("title") or r.get("headline") or "(untitled)")
+    authors = esc(", ".join(r["authors"])) if r.get("authors") else ""
+    badge = _badge(s.get("stance")) if s.get("stance") else ""
+
+    inner = [f'<a href="{esc(read)}" style="font-family:{_SERIF};font-size:19px;line-height:1.3;'
+             f'color:{_INK};text-decoration:none;">{title}</a>']
+    if authors or badge:
+        left = (f'<span style="font-family:{_SANS};font-size:12px;color:{_MUTED};">{authors}</span>'
+                if authors else "")
+        inner.append(
+            '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" '
+            'style="margin:8px 0 12px;"><tr>'
+            f'<td valign="middle">{left}</td>'
+            f'<td valign="middle" align="right">{badge}</td></tr></table>')
+    if s.get("one_paragraph"):
+        inner.append(f'<div style="font-family:{_SERIF};font-size:15px;line-height:1.65;'
+                     f'color:{_BODY};">{esc(s["one_paragraph"])}</div>')
+    elif not s:
+        inner.append(f'<div style="font-family:{_SANS};font-size:13px;color:{_MUTED};'
+                     f'font-style:italic;">Summary unavailable.</div>')
+    kp_html = _key_points(s.get("key_points"))
+    if kp_html:
+        inner.append(kp_html)
+    inner.append(f'<div style="margin-top:16px;">{_buttons(read, pdf)}</div>')
+
+    return (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" '
+            f'bgcolor="{_CARD}" style="background:{_CARD};border:1px solid {_HAIR};'
+            f'border-radius:6px;"><tr><td style="padding:22px 24px;">'
+            f'{"".join(inner)}</td></tr></table>')
+
+
+def render(overview, reports, base_url):
+    date = esc(overview.get("date", ""))
+    n = overview.get("counts", {}).get("total", len(reports))
+    by = overview.get("counts", {}).get("by_stance", {}) or {}
+
+    summ = []
+    for st in ("bullish", "bearish", "neutral", "mixed"):
+        if by.get(st):
+            label, color = _STANCE[st]
+            summ.append(f'<span style="color:{color};">{by[st]} {label.lower()}</span>')
+    summ_html = (" &nbsp;&middot;&nbsp; " + " &nbsp; ".join(summ)) if summ else ""
+
+    masthead = (
+        f'<div style="font-family:{_SANS};font-size:11px;font-weight:bold;letter-spacing:.22em;'
+        f'text-transform:uppercase;color:{_ACCENT};">Research Digest</div>'
+        f'<div style="font-family:{_SERIF};font-size:26px;line-height:1.15;color:{_INK};'
+        f'margin:6px 0 3px;">{date}</div>'
+        f'<div style="font-family:{_SANS};font-size:13px;color:{_MUTED};">'
+        f'{n} report{"s" if n != 1 else ""}{summ_html}</div>'
+        f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" '
+        f'style="margin:14px 0 22px;"><tr>'
+        f'<td height="2" bgcolor="{_ACCENT}" style="font-size:0;line-height:0;">&nbsp;</td>'
+        f'</tr></table>')
+
+    cards = []
+    for r in reports:
+        cards.append(_card(r, base_url))
+        cards.append('<div style="height:16px;line-height:16px;font-size:0;">&nbsp;</div>')
+
+    digest_link = ""
+    if base_url:
+        digest_link = (f' &nbsp;&middot;&nbsp; <a href="{esc(base_url)}/digest/{date}" '
+                       f'style="color:{_MUTED};text-decoration:underline;">View full digest</a>')
+    footer = (
+        f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" '
+        f'style="margin-top:8px;"><tr>'
+        f'<td height="1" bgcolor="{_HAIR}" style="font-size:0;line-height:0;">&nbsp;</td></tr>'
+        f'<tr><td style="padding:14px 0;font-family:{_SANS};font-size:11px;line-height:1.6;'
+        f'color:{_MUTED};">Internal use only.{digest_link}</td></tr></table>')
+
+    pre = f"{n} new GS research report{'s' if n != 1 else ''} for {overview.get('date','')}."
+    preheader = (f'<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;'
+                 f'font-size:1px;line-height:1px;color:{_CANVAS};">{esc(pre)}'
+                 + "&nbsp;&zwnj;" * 30 + '</div>')
+
+    html = (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta name="color-scheme" content="light only">'
+        '</head>'
+        f'<body style="margin:0;padding:0;background:{_CANVAS};">'
+        + preheader
+        + f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" '
+        f'bgcolor="{_CANVAS}" style="background:{_CANVAS};"><tr>'
+        '<td align="center" style="padding:30px 12px 44px;">'
+        '<!--[if mso]><table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+        'width="600"><tr><td><![endif]-->'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" '
+        'style="width:600px;max-width:600px;">'
+        f'<tr><td style="padding:0 8px;">{masthead}{"".join(cards)}{footer}</td></tr></table>'
+        '<!--[if mso]></td></tr></table><![endif]-->'
+        '</td></tr></table></body></html>')
+
+    # plain-text fallback (Outlook uses HTMLBody; kept for completeness)
+    text = [f"GS Research Digest - {overview.get('date','')} - {n} report(s)", ""]
+    for r in reports:
+        s = r.get("summary") or {}
+        text.append("* " + (r.get("title") or r.get("headline") or "(untitled)"))
         if s.get("one_paragraph"):
-            text.append(f"  {s['one_paragraph']}")
-        text.append(f"  {link}")
+            text.append("  " + s["one_paragraph"])
+        link = f"{base_url}/reports/{r['id']}" if base_url else (r.get("source") or "")
+        if link:
+            text.append("  " + link)
         text.append("")
-    html.append("<div style='color:#999;font-size:11px'>Internal use only.</div></div>")
-    return "".join(html), "\n".join(text)
+    return html, "\n".join(text)
 
 
 def send(subject, html, preview=False):
