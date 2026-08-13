@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: treasury-news-web
+  labels:
+    app: treasury-news-web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: treasury-news-web
+  template:
+    metadata:
+      labels:
+        app: treasury-news-web
+    spec:
+      containers:
+        - name: web
+          # Replace PROJECT with your OpenShift project/namespace after `oc new-build`/push.
+          image: image-registry.openshift-image-registry.svc:5000/PROJECT/treasury-news-web:latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: treasury-news-db      # DB_USER/DB_PASSWORD/DB_CONNECT_STRING/DB_SCHEMA
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL

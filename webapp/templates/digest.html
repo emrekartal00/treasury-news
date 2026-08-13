@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Digest {{ digest_date }}{% endblock %}
+{% block content %}
+<h1>Digest &middot; {{ digest_date }}</h1>
+<p class="meta">
+  {{ digest.counts.total }} report(s)
+  {%- if digest.counts.by_stance %} &middot;
+    {% for k, v in digest.counts.by_stance.items() %}{{ k }} {{ v }}{% if not loop.last %}, {% endif %}{% endfor %}
+  {%- endif %}
+</p>
+<ul class="items">
+  {% for it in digest['items'] %}
+  <li>
+    <a href="{{ url_for('report', rid=it.report_id) }}">{{ it.headline }}</a>
+    <span class="stance">{{ it.stance }}</span>
+  </li>
+  {% endfor %}
+</ul>
+{% endblock %}

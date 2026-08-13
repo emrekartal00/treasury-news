@@ -54,3 +54,7 @@ LOCAL_SETUP.md
 .DS_Store
 .idea/
 .vscode/
+
+# OpenShift secrets (real values)
+secret.yaml
+**/secret.yaml

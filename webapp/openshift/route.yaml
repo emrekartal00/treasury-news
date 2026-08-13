@@ -1,0 +1,18 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: treasury-news-web
+  labels:
+    app: treasury-news-web
+spec:
+  to:
+    kind: Service
+    name: treasury-news-web
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  # IMPORTANT: keep this INTERNAL. Set an internal host and/or restrict access
+  # (licensed content must not be exposed on the public internet).
+  # host: treasury-news.apps.internal.your-cluster.example

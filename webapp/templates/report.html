@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}{{ r.title or 'Report' }}{% endblock %}
+{% block content %}
+<article class="report">
+  <h1>{{ r.title or r.headline or '(untitled)' }}</h1>
+  <p class="meta">
+    {%- if r.date %}{{ r.date }}{% endif %}
+    {%- if r.authors %} &middot; {{ r.authors|join(', ') }}{% endif %}
+    {%- if r.pages %} &middot; {{ r.pages }} pages{% endif -%}
+  </p>
+
+  {% if r.summary %}
+  <section class="summary">
+    <h2>Summary</h2>
+    {% if r.summary.stance %}<span class="pill">{{ r.summary.stance }}</span>{% endif %}
+    {% if r.summary.one_paragraph %}<p>{{ r.summary.one_paragraph }}</p>{% endif %}
+    {% if r.summary.key_points %}
+    <ul>{% for kp in r.summary.key_points %}<li>{{ kp.point }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if r.summary.instruments %}<p class="tags"><strong>Instruments:</strong> {{ r.summary.instruments|join(', ') }}</p>{% endif %}
+    {% if r.summary.risk_flags %}<p class="tags"><strong>Risks:</strong> {{ r.summary.risk_flags|join('; ') }}</p>{% endif %}
+  </section>
+  {% else %}
+  <p class="empty">No summary available for this report.</p>
+  {% endif %}
+
+  {% if r.has_pdf %}
+  <section class="pdf-view">
+    <h2>PDF <a class="dl" href="{{ url_for('report_pdf', rid=r.id) }}?download=1">download</a></h2>
+    <iframe src="{{ url_for('report_pdf', rid=r.id) }}" title="Report PDF" loading="lazy"></iframe>
+  </section>
+  {% endif %}
+</article>
+{% endblock %}
