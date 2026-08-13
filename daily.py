@@ -11,6 +11,7 @@ Run in Spyder (Run file) or:
 """
 import argparse
 import json
+import os
 import random
 import re
 import time
@@ -80,12 +81,15 @@ def main():
         )
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
-        print("▶ Opening My Content…")
+        # Tunable for slow connections (milliseconds), overridable via .env.
+        nav_timeout = int(os.environ.get("SCRAPE_NAV_TIMEOUT_MS", "90000"))
+        warm_ms = int(os.environ.get("SCRAPE_WARM_MS", "6000"))
+        print("Opening My Content...")
         try:
-            page.goto(config.MYCONTENT, wait_until="domcontentloaded", timeout=60000)
+            page.goto(config.MYCONTENT, wait_until="domcontentloaded", timeout=nav_timeout)
         except Exception as exc:
             print("  (goto note:", exc, ")")
-        page.wait_for_timeout(3500)
+        page.wait_for_timeout(warm_ms)
 
         def fetch_page(offset):
             r = ctx.request.get(config.feed_url(offset, args.limit), timeout=30000)
@@ -96,24 +100,39 @@ def main():
                 return data
             return data.get("results") or data.get("items") or []
 
-        print("▶ Reading feed…")
+        print("Reading feed...")
         feed = []
-        offset = 0
-        while offset < 300:
+        # First page with retries: on a slow connection the session/feed may not be ready
+        # immediately after warming, and can come back empty. Retry before giving up.
+        batch = []
+        for attempt in range(1, 5):
             try:
-                batch = fetch_page(offset)
+                batch = fetch_page(0)
             except Exception as exc:
-                print("  feed error:", exc)
+                print(f"  feed error (try {attempt}): {exc}")
+                batch = []
+            if batch:
                 break
-            if not batch:
-                break
-            feed.extend(batch)
-            oldest = min((x.get("publicationDateTime") or 0) for x in batch)
-            if since_ms and oldest < since_ms:
-                break
-            if not since_ms:
-                break
-            offset += args.limit
+            if attempt < 4:
+                print(f"  feed empty; waiting 5s and retrying ({attempt}/4)")
+                page.wait_for_timeout(5000)
+        feed.extend(batch)
+        # Paginate further only when a --days window is set (one page is enough otherwise).
+        if batch and since_ms:
+            offset = args.limit
+            while offset < 300:
+                try:
+                    more = fetch_page(offset)
+                except Exception as exc:
+                    print("  feed error:", exc)
+                    break
+                if not more:
+                    break
+                feed.extend(more)
+                oldest = min((x.get("publicationDateTime") or 0) for x in more)
+                if oldest < since_ms:
+                    break
+                offset += args.limit
 
         cands = [it for it in feed if it.get("id") and it["id"] not in seen["ids"]]
         if since_ms:
@@ -140,7 +159,7 @@ def main():
             # HTML: navigate so the SPA authorizes the content route, then save rendered DOM.
             html_bytes = 0
             try:
-                page.goto(html_url, wait_until="domcontentloaded", timeout=60000)
+                page.goto(html_url, wait_until="domcontentloaded", timeout=nav_timeout)
                 try:
                     page.wait_for_function(
                         "() => document.title && !/login/i.test(document.title) "
@@ -169,7 +188,7 @@ def main():
             pdf_info = None
             if pdf_url:
                 try:
-                    r = ctx.request.get(pdf_url, timeout=60000)
+                    r = ctx.request.get(pdf_url, timeout=120000)
                     body = r.body()
                     is_pdf = body[:5] == b"%PDF-"
                     Path(f"{base}." + ("pdf" if is_pdf else "pdf.html")).write_bytes(body)
@@ -192,11 +211,15 @@ def main():
                 json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
             )
 
-            seen["ids"][it["id"]] = {"date": date, "title": it.get("title"), "fetchedAt": now_iso()}
-            save_seen(seen)
-            done += 1
-            if done < len(cands):
-                human_pause()
+            # Only mark seen if we actually captured something, so a slow/failed download
+            # retries next run instead of being silently skipped forever.
+            if html_bytes > 0 or pdf_info is not None:
+                seen["ids"][it["id"]] = {"date": date, "title": it.get("title"), "fetchedAt": now_iso()}
+                save_seen(seen)
+                done += 1
+            else:
+                print("    (nothing captured - kept unseen, will retry next run)")
+            human_pause()
 
         seen["lastRun"] = now_iso()
         save_seen(seen)
