@@ -1,4 +1,4 @@
-"""config.py — target endpoints from environment variables.
+"""config.py - target endpoints from environment variables.
 
 Committed defaults are PLACEHOLDERS on purpose (this file is public). Real values live
 in .env (gitignored). See .env.example / LOCAL_SETUP.md. No third-party deps: .env is
@@ -25,6 +25,9 @@ def _load_env(path: Path) -> None:
 
 _load_env(_ENV)
 
+# DB schema that owns the tables (set as CURRENT_SCHEMA after connect). From env only.
+DB_SCHEMA = os.environ.get("DB_SCHEMA", "")
+
 ORIGIN = os.environ.get("TARGET_ORIGIN", "https://REDACTED.example.com")
 HOMEPAGE = os.environ.get("TARGET_HOMEPAGE", f"{ORIGIN}/REDACTED/homepage.html")
 MYCONTENT = os.environ.get("TARGET_MYCONTENT", f"{ORIGIN}/REDACTED/my-content")
@@ -37,5 +40,5 @@ def feed_url(offset: int, limit: int) -> str:
 
 
 def report_regex() -> "re.Pattern[str]":
-    """Report-URL matcher built from the (masked) path prefix — no real path hardcoded."""
+    """Report-URL matcher built from the (masked) path prefix - no real path hardcoded."""
     return re.compile(re.escape(REPORT_PREFIX) + r"/(\d{4})/(\d{2})/(\d{2})/([0-9a-f-]{36})\.html")
