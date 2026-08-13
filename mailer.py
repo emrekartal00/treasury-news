@@ -65,9 +65,10 @@ def esc(s):
 # --- email styling (editorial research note; email-safe: tables + inline CSS + web-safe fonts) ---
 _INK = "#1c1c1a"
 _MUTED = "#6f6b64"
-_BODY = "#33322e"
+_BODY = "#2b2a27"
 _HAIR = "#e6e3dc"
 _ACCENT = "#0b5f57"
+_ACCENT_DK = "#083f3a"
 _CANVAS = "#f7f6f2"
 _CARD = "#ffffff"
 _SERIF = "Georgia,'Times New Roman',serif"
@@ -90,16 +91,21 @@ def _badge(stance):
 
 
 def _buttons(read_href, pdf_href):
-    cells = [f'<td bgcolor="{_ACCENT}" style="border-radius:4px;">'
-             f'<a href="{esc(read_href)}" style="display:inline-block;font-family:{_SANS};'
-             f'font-size:13px;font-weight:bold;color:#ffffff;text-decoration:none;'
-             f'padding:10px 18px;letter-spacing:.02em;">Read report &#8250;</a></td>']
+    # Padded blocks with a darker bottom edge -> read as pressable buttons even in Outlook
+    # (which ignores border-radius but does render the border).
+    cells = [f'<td bgcolor="{_ACCENT}" style="border-radius:6px;border-bottom:3px solid {_ACCENT_DK};'
+             f'padding:13px 26px;text-align:center;mso-padding-alt:13px 26px;">'
+             f'<a href="{esc(read_href)}" style="font-family:{_SANS};font-size:13px;font-weight:bold;'
+             f'color:#ffffff;text-decoration:none;letter-spacing:.06em;text-transform:uppercase;">'
+             f'Read report</a></td>']
     if pdf_href:
-        cells.append('<td width="10" style="font-size:0;line-height:0;">&nbsp;</td>')
-        cells.append(f'<td bgcolor="{_CARD}" style="border:1px solid {_HAIR};border-radius:4px;">'
-                     f'<a href="{esc(pdf_href)}" style="display:inline-block;font-family:{_SANS};'
-                     f'font-size:13px;font-weight:bold;color:{_INK};text-decoration:none;'
-                     f'padding:10px 16px;">PDF</a></td>')
+        cells.append('<td width="12" style="font-size:0;line-height:0;">&nbsp;</td>')
+        cells.append(f'<td bgcolor="{_CARD}" style="border:1px solid {_ACCENT};'
+                     f'border-bottom:3px solid {_ACCENT};border-radius:6px;padding:13px 22px;'
+                     f'text-align:center;mso-padding-alt:13px 22px;">'
+                     f'<a href="{esc(pdf_href)}" style="font-family:{_SANS};font-size:13px;'
+                     f'font-weight:bold;color:{_ACCENT};text-decoration:none;letter-spacing:.06em;'
+                     f'text-transform:uppercase;">PDF</a></td>')
     return ('<table role="presentation" cellpadding="0" cellspacing="0" border="0">'
             f'<tr>{"".join(cells)}</tr></table>')
 
@@ -133,8 +139,8 @@ def _card(r, base_url):
     authors = esc(", ".join(r["authors"])) if r.get("authors") else ""
     badge = _badge(s.get("stance")) if s.get("stance") else ""
 
-    inner = [f'<a href="{esc(read)}" style="font-family:{_SERIF};font-size:19px;line-height:1.3;'
-             f'color:{_INK};text-decoration:none;">{title}</a>']
+    inner = [f'<a href="{esc(read)}" style="font-family:{_SANS};font-size:18px;line-height:1.35;'
+             f'font-weight:bold;color:{_INK};text-decoration:none;">{title}</a>']
     if authors or badge:
         left = (f'<span style="font-family:{_SANS};font-size:12px;color:{_MUTED};">{authors}</span>'
                 if authors else "")
@@ -144,7 +150,7 @@ def _card(r, base_url):
             f'<td valign="middle">{left}</td>'
             f'<td valign="middle" align="right">{badge}</td></tr></table>')
     if s.get("one_paragraph"):
-        inner.append(f'<div style="font-family:{_SERIF};font-size:15px;line-height:1.65;'
+        inner.append(f'<div style="font-family:{_SANS};font-size:15px;line-height:1.6;'
                      f'color:{_BODY};">{esc(s["one_paragraph"])}</div>')
     elif not s:
         inner.append(f'<div style="font-family:{_SANS};font-size:13px;color:{_MUTED};'
@@ -156,7 +162,7 @@ def _card(r, base_url):
 
     return (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" '
             f'bgcolor="{_CARD}" style="background:{_CARD};border:1px solid {_HAIR};'
-            f'border-radius:6px;"><tr><td style="padding:22px 24px;">'
+            f'border-radius:6px;"><tr><td style="padding:24px 28px;">'
             f'{"".join(inner)}</td></tr></table>')
 
 
@@ -216,9 +222,9 @@ def render(overview, reports, base_url):
         f'bgcolor="{_CANVAS}" style="background:{_CANVAS};"><tr>'
         '<td align="center" style="padding:30px 12px 44px;">'
         '<!--[if mso]><table role="presentation" cellpadding="0" cellspacing="0" border="0" '
-        'width="600"><tr><td><![endif]-->'
-        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" '
-        'style="width:600px;max-width:600px;">'
+        'width="640"><tr><td><![endif]-->'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="640" '
+        'style="width:640px;max-width:640px;">'
         f'<tr><td style="padding:0 8px;">{masthead}{"".join(cards)}{footer}</td></tr></table>'
         '<!--[if mso]></td></tr></table><![endif]-->'
         '</td></tr></table></body></html>')
