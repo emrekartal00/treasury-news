@@ -10,6 +10,7 @@ Run in Spyder (Run file) or:
   python daily.py --limit 50    # feed page size to scan
 """
 import argparse
+import base64
 import json
 import os
 import random
@@ -92,10 +93,18 @@ def main():
         page.wait_for_timeout(warm_ms)
 
         def fetch_page(offset):
-            r = ctx.request.get(config.feed_url(offset, args.limit), timeout=30000)
-            if not r.ok:
-                raise RuntimeError(f"feed {r.status} at offset {offset}")
-            data = r.json()
+            # Fetch INSIDE the page (Chrome's network stack -> uses the corporate proxy and
+            # the logged-in cookies). ctx.request.get bypasses the system proxy -> ETIMEDOUT.
+            res = page.evaluate(
+                """async (u) => {
+                    const r = await fetch(u, { credentials: 'include' });
+                    return { status: r.status, ok: r.ok, body: await r.text() };
+                }""",
+                config.feed_url(offset, args.limit),
+            )
+            if not res["ok"]:
+                raise RuntimeError(f"feed {res['status']} at offset {offset}")
+            data = json.loads(res["body"]) if res["body"] else []
             if isinstance(data, list):
                 return data
             return data.get("results") or data.get("items") or []
@@ -188,11 +197,24 @@ def main():
             pdf_info = None
             if pdf_url:
                 try:
-                    r = ctx.request.get(pdf_url, timeout=120000)
-                    body = r.body()
+                    # Fetch the PDF inside the page too (proxy + cookies); return base64.
+                    res = page.evaluate(
+                        """async (u) => {
+                            const r = await fetch(u, { credentials: 'include' });
+                            const buf = new Uint8Array(await r.arrayBuffer());
+                            let bin = '';
+                            const CH = 0x8000;
+                            for (let i = 0; i < buf.length; i += CH) {
+                                bin += String.fromCharCode.apply(null, buf.subarray(i, i + CH));
+                            }
+                            return { status: r.status, b64: btoa(bin) };
+                        }""",
+                        pdf_url,
+                    )
+                    body = base64.b64decode(res["b64"])
                     is_pdf = body[:5] == b"%PDF-"
                     Path(f"{base}." + ("pdf" if is_pdf else "pdf.html")).write_bytes(body)
-                    pdf_info = {"status": r.status, "bytes": len(body), "isPdf": is_pdf}
+                    pdf_info = {"status": res["status"], "bytes": len(body), "isPdf": is_pdf}
                     note = "" if is_pdf else ", NOT a real pdf"
                     print(f"    ✓ pdf ({len(body)} bytes{note})")
                 except Exception as exc:
