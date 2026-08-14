@@ -1,3 +1,4 @@
 Flask>=3.0
 oracledb>=2.0
-gunicorn>=21.2
+waitress>=2.1          # WSGI server for local/Windows hosting
+gunicorn>=21.2 ; sys_platform != "win32"   # OpenShift/Linux only (won't install on Windows)

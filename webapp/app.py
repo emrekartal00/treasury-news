@@ -83,4 +83,7 @@ def readyz():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    import os
+    # Dev server bound to the LAN. debug is OFF (the debugger would let anyone on the
+    # network run code). For a sturdier server use waitress (see webapp/README.md).
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))

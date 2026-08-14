@@ -21,15 +21,24 @@ and never talks to the AI or SMTP. Uses `python-oracledb` thin mode (no Oracle c
 | `DB_CONNECT_STRING` | `host:port/service_name` |
 | `DB_SCHEMA` | schema that owns the tables (set as CURRENT_SCHEMA) |
 
-## Run locally
-```bash
+## Run locally on the LAN (Windows PC)
+Reads DB creds from the repo-root `.env` automatically (`DB_USER/PASSWORD/CONNECT_STRING/DB_SCHEMA`).
+```bat
 cd webapp
 pip install -r requirements.txt
-export DB_USER=... DB_PASSWORD=... DB_CONNECT_STRING=host:port/service DB_SCHEMA=...
-python app.py                 # dev server on http://localhost:8080
-# or production-style:
-gunicorn -b 0.0.0.0:8080 app:app
+:: sturdy server (recommended on Windows; gunicorn does NOT run on Windows):
+waitress-serve --host=0.0.0.0 --port=8080 app:app
+:: or a quick dev server:
+python app.py
 ```
+Then share the URL with the LAN:
+```bat
+ipconfig            :: note the IPv4 Address, e.g. 10.1.2.3
+```
+Colleagues open `http://10.1.2.3:8080`. `--host=0.0.0.0` binds all interfaces so the LAN can
+reach it. If they can't connect, allow the port through **Windows Defender Firewall**
+(first run may prompt "Allow access" -> allow on the Private network), or add an inbound rule
+for TCP 8080. Populate data first by running the pipeline; an empty archive shows nothing.
 
 ## Deploy to OpenShift
 ```bash
