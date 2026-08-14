@@ -26,9 +26,19 @@
 
   {% if r.has_pdf %}
   <section class="pdf-view">
-    <h2>PDF <a class="dl" href="{{ url_for('report_pdf', rid=r.id) }}?download=1">download</a></h2>
-    <iframe src="{{ url_for('report_pdf', rid=r.id) }}" title="Report PDF" loading="lazy"></iframe>
+    <h2>Report
+      <button type="button" class="fs-btn" onclick="pdfFullscreen()">Fullscreen</button>
+      <a class="dl" href="{{ url_for('report_pdf', rid=r.id) }}?download=1">download</a>
+    </h2>
+    <iframe id="pdfFrame" src="{{ url_for('report_pdf', rid=r.id) }}" title="Report PDF" loading="lazy"></iframe>
   </section>
+  <script>
+    function pdfFullscreen() {
+      var f = document.getElementById('pdfFrame');
+      var req = f.requestFullscreen || f.webkitRequestFullscreen || f.msRequestFullscreen;
+      if (req) { req.call(f); } else { window.open(f.src, '_blank'); }
+    }
+  </script>
   {% endif %}
 </article>
 {% endblock %}

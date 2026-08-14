@@ -90,24 +90,15 @@ def _badge(stance):
             f'{label}</span>')
 
 
-def _buttons(read_href, pdf_href):
-    # Padded blocks with a darker bottom edge -> read as pressable buttons even in Outlook
-    # (which ignores border-radius but does render the border).
-    cells = [f'<td bgcolor="{_ACCENT}" style="border-radius:6px;border-bottom:3px solid {_ACCENT_DK};'
-             f'padding:13px 26px;text-align:center;mso-padding-alt:13px 26px;">'
-             f'<a href="{esc(read_href)}" style="font-family:{_SANS};font-size:13px;font-weight:bold;'
-             f'color:#ffffff;text-decoration:none;letter-spacing:.06em;text-transform:uppercase;">'
-             f'Read report</a></td>']
-    if pdf_href:
-        cells.append('<td width="12" style="font-size:0;line-height:0;">&nbsp;</td>')
-        cells.append(f'<td bgcolor="{_CARD}" style="border:1px solid {_ACCENT};'
-                     f'border-bottom:3px solid {_ACCENT};border-radius:6px;padding:13px 22px;'
-                     f'text-align:center;mso-padding-alt:13px 22px;">'
-                     f'<a href="{esc(pdf_href)}" style="font-family:{_SANS};font-size:13px;'
-                     f'font-weight:bold;color:{_ACCENT};text-decoration:none;letter-spacing:.06em;'
-                     f'text-transform:uppercase;">PDF</a></td>')
-    return ('<table role="presentation" cellpadding="0" cellspacing="0" border="0">'
-            f'<tr>{"".join(cells)}</tr></table>')
+def _button(read_href):
+    # Single primary button; the report page it opens already renders the PDF, so a
+    # separate PDF button would be redundant. Darker bottom edge reads as pressable in Outlook.
+    return ('<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+            f'<td bgcolor="{_ACCENT}" style="border-radius:6px;border-bottom:3px solid {_ACCENT_DK};'
+            f'padding:13px 28px;text-align:center;mso-padding-alt:13px 28px;">'
+            f'<a href="{esc(read_href)}" style="font-family:{_SANS};font-size:13px;font-weight:bold;'
+            f'color:#ffffff;text-decoration:none;letter-spacing:.06em;text-transform:uppercase;">'
+            f'Read report</a></td></tr></table>')
 
 
 def _key_points(kps):
@@ -131,10 +122,6 @@ def _card(r, base_url):
     s = r.get("summary") or {}
     rid = r["id"]
     read = f"{base_url}/reports/{rid}" if base_url else (r.get("source") or "#")
-    if base_url:
-        pdf = f"{base_url}/reports/{rid}/pdf"
-    else:
-        pdf = r.get("download") or ""
     title = esc(r.get("title") or r.get("headline") or "(untitled)")
     authors = esc(", ".join(r["authors"])) if r.get("authors") else ""
     badge = _badge(s.get("stance")) if s.get("stance") else ""
@@ -158,7 +145,7 @@ def _card(r, base_url):
     kp_html = _key_points(s.get("key_points"))
     if kp_html:
         inner.append(kp_html)
-    inner.append(f'<div style="margin-top:16px;">{_buttons(read, pdf)}</div>')
+    inner.append(f'<div style="margin-top:16px;">{_button(read)}</div>')
 
     return (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" '
             f'bgcolor="{_CARD}" style="background:{_CARD};border:1px solid {_HAIR};'
@@ -206,6 +193,10 @@ def render(overview, reports, base_url):
         f'<tr><td style="padding:14px 0;font-family:{_SANS};font-size:11px;line-height:1.6;'
         f'color:{_MUTED};">Internal use only.{digest_link}</td></tr></table>')
 
+    disclaimer = (f'<div style="font-family:{_SANS};font-size:12px;font-style:italic;'
+                  f'color:{_MUTED};line-height:1.5;margin:2px 0 22px;">These summaries are '
+                  f'AI-generated - please read the full report for important information.</div>')
+
     pre = f"{n} new GS research report{'s' if n != 1 else ''} for {overview.get('date','')}."
     preheader = (f'<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;'
                  f'font-size:1px;line-height:1px;color:{_CANVAS};">{esc(pre)}'
@@ -225,7 +216,7 @@ def render(overview, reports, base_url):
         'width="640"><tr><td><![endif]-->'
         '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="640" '
         'style="width:640px;max-width:640px;">'
-        f'<tr><td style="padding:0 8px;">{masthead}{"".join(cards)}{footer}</td></tr></table>'
+        f'<tr><td style="padding:0 8px;">{masthead}{disclaimer}{"".join(cards)}{footer}</td></tr></table>'
         '<!--[if mso]></td></tr></table><![endif]-->'
         '</td></tr></table></body></html>')
 
