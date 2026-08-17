@@ -94,5 +94,5 @@ placeholders). Fill them in `.env` — see `.env.example`.
 - Only use with accounts you're entitled to; respect each portal's terms.
 - The saved login session (`user-data/`) and any stored portal credentials are sensitive —
   never commit or share them.
-- The database schema (DDL under `db/migrations/`) and architecture docs are kept local,
-  not in this repo.
+- The schema migrations live in `db/migrations/` (run them as the schema owner). Deeper
+  architecture docs and `db/discover.sql` are kept local, not in this repo.
