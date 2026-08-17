@@ -10,6 +10,7 @@
 ------------------------------------------------------------------- reports
 CREATE TABLE reports (
   report_id             VARCHAR2(64)  CONSTRAINT pk_reports PRIMARY KEY,
+  source                VARCHAR2(30)  DEFAULT 'gs',   -- portal key: gs/jpm/citi/barc/ms/db
   title                 NVARCHAR2(1000),
   distribution_headline NVARCHAR2(2000),
   publication_ts        TIMESTAMP WITH TIME ZONE,
@@ -25,6 +26,7 @@ CREATE TABLE reports (
 );
 CREATE INDEX ix_reports_pubdate ON reports (publication_date);
 CREATE INDEX ix_reports_status  ON reports (status);
+CREATE INDEX ix_reports_source  ON reports (source);
 
 ------------------------------------------------------------------- report_pdf (BLOB archive)
 CREATE TABLE report_pdf (

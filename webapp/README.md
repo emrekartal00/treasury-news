@@ -15,8 +15,8 @@ and never talks to the AI or SMTP. Uses `python-oracledb` thin mode (no Oracle c
 | `GET /healthz` `GET /readyz` | Liveness / readiness (DB ping) |
 
 `<id>` may be a bare id (the original source) or a namespaced `source:id` (e.g. `jpm:...`);
-the route accepts both. The archive reads the `reports.source` column, so apply migration
-`003_add_source.sql` before deploying against an older schema.
+the route accepts both. The archive reads the `reports.source` column (part of the
+`001_init.sql` schema).
 
 ## Environment
 | Var | Meaning |
