@@ -10,7 +10,8 @@ from flask import Flask, Response, abort, render_template, request
 import db
 
 app = Flask(__name__)
-_UUID = re.compile(r"^[0-9a-fA-F-]{36}$")
+# Accept a bare GS UUID, or a namespaced multi-source id like "jpm:1a2b..." / "citi:ABC-1".
+_RID = re.compile(r"^(?:[0-9a-fA-F-]{36}|[a-z0-9]{1,20}:[A-Za-z0-9._:-]{1,120})$")
 
 
 @app.route("/")
@@ -36,7 +37,7 @@ def search():
 
 @app.route("/reports/<rid>")
 def report(rid):
-    if not _UUID.match(rid):
+    if not _RID.match(rid):
         abort(404)
     r = db.get_report(rid)
     if not r:
@@ -46,7 +47,7 @@ def report(rid):
 
 @app.route("/reports/<rid>/pdf")
 def report_pdf(rid):
-    if not _UUID.match(rid):
+    if not _RID.match(rid):
         abort(404)
     data = db.get_pdf(rid)
     if not data:

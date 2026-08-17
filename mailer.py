@@ -15,6 +15,7 @@ import uuid
 
 import oracledb
 
+import curate
 import db_conn
 
 
@@ -42,24 +43,34 @@ def load_digest(cur, date_str):
 
 def load_report(cur, rid):
     cur.execute("""
-        SELECT r.title, r.distribution_headline, r.authors, r.source_path, r.download_path, s.summary_json
+        SELECT r.title, r.distribution_headline, r.authors, r.source_path, r.download_path,
+               s.summary_json, r.source
         FROM reports r LEFT JOIN report_summary s ON s.report_id = r.report_id
         WHERE r.report_id = :id
     """, {"id": rid})
     row = cur.fetchone()
     if not row:
         return None
-    title, headline, authors_b, src, dl, sj = row
+    title, headline, authors_b, src, dl, sj, source = row
     return {
         "id": rid, "title": title, "headline": headline,
         "authors": db_conn.as_json(authors_b) or [],
-        "source": src, "download": dl,
+        "source_path": src, "download": dl, "source": source or "gs",
         "summary": db_conn.as_json(sj) or {},
     }
 
 
 def esc(s):
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def count_stances(reports):
+    """Recompute overview counts for the (possibly curated) set actually in the email."""
+    by = {}
+    for r in reports:
+        st = (r.get("summary") or {}).get("stance") or "n/a"
+        by[st] = by.get(st, 0) + 1
+    return {"total": len(reports), "by_stance": by}
 
 
 # --- email styling (editorial research note; email-safe: tables + inline CSS + web-safe fonts) ---
@@ -83,10 +94,13 @@ _STANCE = {
 
 
 def _badge(stance):
+    # Mixed-case label (no text-transform): all-caps + heavy tracking read poorly, and
+    # CSS uppercasing under a Turkish system locale turns "Bullish" -> "BULLISH" with a
+    # dotted capital I. Rendering the label as-is is both more legible and locale-proof.
     label, color = _STANCE.get((stance or "n/a").lower(), _STANCE["n/a"])
-    return (f'<span style="font-family:{_SANS};font-size:11px;font-weight:bold;'
-            f'letter-spacing:.08em;text-transform:uppercase;color:{color};'
-            f'border:1px solid {color};border-radius:3px;padding:2px 8px;white-space:nowrap;">'
+    return (f'<span style="font-family:{_SANS};font-size:12px;font-weight:bold;'
+            f'letter-spacing:.01em;color:{color};'
+            f'border:1px solid {color};border-radius:4px;padding:3px 10px;white-space:nowrap;">'
             f'{label}</span>')
 
 
@@ -97,8 +111,8 @@ def _button(read_href):
             f'<td bgcolor="{_ACCENT}" style="border-radius:6px;border-bottom:3px solid {_ACCENT_DK};'
             f'padding:13px 28px;text-align:center;mso-padding-alt:13px 28px;">'
             f'<a href="{esc(read_href)}" style="font-family:{_SANS};font-size:13px;font-weight:bold;'
-            f'color:#ffffff;text-decoration:none;letter-spacing:.06em;text-transform:uppercase;">'
-            f'Read report</a></td></tr></table>')
+            f'color:#ffffff;text-decoration:none;letter-spacing:.06em;">'
+            f'READ REPORT</a></td></tr></table>')
 
 
 def _key_points(kps):
@@ -121,16 +135,22 @@ def _key_points(kps):
 def _card(r, base_url):
     s = r.get("summary") or {}
     rid = r["id"]
-    read = f"{base_url}/reports/{rid}" if base_url else (r.get("source") or "#")
+    read = f"{base_url}/reports/{rid}" if base_url else (r.get("source_path") or "#")
     title = esc(r.get("title") or r.get("headline") or "(untitled)")
     authors = esc(", ".join(r["authors"])) if r.get("authors") else ""
     badge = _badge(s.get("stance")) if s.get("stance") else ""
+    src_label = esc((r.get("source") or "").upper())
 
     inner = [f'<a href="{esc(read)}" style="font-family:{_SANS};font-size:18px;line-height:1.35;'
              f'font-weight:bold;color:{_INK};text-decoration:none;">{title}</a>']
-    if authors or badge:
-        left = (f'<span style="font-family:{_SANS};font-size:12px;color:{_MUTED};">{authors}</span>'
-                if authors else "")
+    if authors or badge or src_label:
+        src_html = (f'<span style="font-family:{_SANS};font-size:11px;font-weight:bold;'
+                    f'letter-spacing:.05em;color:{_ACCENT};">{src_label}</span>'
+                    if src_label else "")
+        sep = ' &nbsp;&middot;&nbsp; ' if (src_label and authors) else ""
+        left = (f'{src_html}{sep}'
+                f'<span style="font-family:{_SANS};font-size:12px;color:{_MUTED};">{authors}</span>'
+                if (authors or src_label) else "")
         inner.append(
             '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" '
             'style="margin:8px 0 12px;"><tr>'
@@ -167,7 +187,7 @@ def render(overview, reports, base_url):
 
     masthead = (
         f'<div style="font-family:{_SANS};font-size:11px;font-weight:bold;letter-spacing:.22em;'
-        f'text-transform:uppercase;color:{_ACCENT};">Research Digest</div>'
+        f'color:{_ACCENT};">RESEARCH DIGEST</div>'
         f'<div style="font-family:{_SERIF};font-size:26px;line-height:1.15;color:{_INK};'
         f'margin:6px 0 3px;">{date}</div>'
         f'<div style="font-family:{_SANS};font-size:13px;color:{_MUTED};">'
@@ -203,7 +223,7 @@ def render(overview, reports, base_url):
                  + "&nbsp;&zwnj;" * 30 + '</div>')
 
     html = (
-        '<!doctype html><html><head><meta charset="utf-8">'
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta name="color-scheme" content="light only">'
         '</head>'
@@ -213,9 +233,9 @@ def render(overview, reports, base_url):
         f'bgcolor="{_CANVAS}" style="background:{_CANVAS};"><tr>'
         '<td align="center" style="padding:30px 12px 44px;">'
         '<!--[if mso]><table role="presentation" cellpadding="0" cellspacing="0" border="0" '
-        'width="640"><tr><td><![endif]-->'
-        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="640" '
-        'style="width:640px;max-width:640px;">'
+        'width="1200"><tr><td><![endif]-->'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="1200" '
+        'style="width:1200px;max-width:1200px;">'
         f'<tr><td style="padding:0 8px;">{masthead}{disclaimer}{"".join(cards)}{footer}</td></tr></table>'
         '<!--[if mso]></td></tr></table><![endif]-->'
         '</td></tr></table></body></html>')
@@ -227,7 +247,7 @@ def render(overview, reports, base_url):
         text.append("* " + (r.get("title") or r.get("headline") or "(untitled)"))
         if s.get("one_paragraph"):
             text.append("  " + s["one_paragraph"])
-        link = f"{base_url}/reports/{r['id']}" if base_url else (r.get("source") or "")
+        link = f"{base_url}/reports/{r['id']}" if base_url else (r.get("source_path") or "")
         if link:
             text.append("  " + link)
         text.append("")
@@ -272,6 +292,7 @@ def main():
     ap.add_argument("--date")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--preview", action="store_true", help="open in Outlook instead of sending")
+    ap.add_argument("--no-curate", action="store_true", help="skip AI curation; email every report")
     args, _ = ap.parse_known_args()
 
     con = db_conn.connect()
@@ -290,6 +311,17 @@ def main():
         return
 
     reports = [r for r in (load_report(cur, rid) for rid in ids) if r]
+
+    # AI curation: trim the email to the reports worth pushing. The web archive, the
+    # homepage, and the "View full digest" link all still show every report.
+    if not args.no_curate:
+        reports = curate.select(reports)
+    if not reports:
+        print(f"Curation excluded every report for {date_str}; nothing to send.")
+        con.close()
+        return
+    overview["counts"] = count_stances(reports)
+
     base = os.environ.get("WEBAPP_BASE_URL", "").rstrip("/")
     subject = f"GS Research Digest - {date_str} - {len(reports)} report(s)"
     html, text = render(overview, reports, base)

@@ -9,8 +9,12 @@ Run:
   python pipeline.py --only ingest   # just one stage
   python pipeline.py --from summarize# from a stage to the end
   python pipeline.py -- --days 3      # args after `--` go to the scrape stage (daily.py)
+
+Multi-source: the scrape stage runs daily.py once per portal listed in SOURCES (comma-
+separated, default 'gs'), e.g. SOURCES=gs,jpm. The other stages are source-agnostic.
 """
 import argparse
+import os
 import subprocess
 import sys
 
@@ -43,10 +47,21 @@ def main():
     else:
         selected = STAGES
 
+    src_list = [s.strip() for s in os.environ.get("SOURCES", "gs").split(",") if s.strip()]
+
     for name, script in selected:
-        stage_args = extra if name == "scrape" else []
         print(f"\n===== stage: {name} ({script}) =====")
-        rc = subprocess.run([sys.executable, script, *stage_args]).returncode
+        if name == "scrape":
+            # One scrape run per configured portal; extra args (e.g. --days 3) go to each.
+            # A single portal failing (e.g. an expired session) must NOT block the digest -
+            # warn and carry on with the others and the later stages.
+            for src in src_list:
+                print(f"----- source: {src} -----")
+                rc = subprocess.run([sys.executable, script, "--source", src, *extra]).returncode
+                if rc != 0:
+                    print(f"[WARN] scrape of '{src}' exited with code {rc}; continuing.")
+            continue
+        rc = subprocess.run([sys.executable, script]).returncode
         if rc != 0:
             print(f"[STOP] stage '{name}' exited with code {rc}")
             sys.exit(rc)

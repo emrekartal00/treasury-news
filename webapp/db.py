@@ -79,20 +79,21 @@ def ping():
 def recent(limit=25, offset=0):
     rows = _rows("""
         SELECT r.report_id, r.title, TO_CHAR(r.publication_date,'YYYY-MM-DD'),
-               s.headline, CASE WHEN p.report_id IS NOT NULL THEN 1 ELSE 0 END
+               s.headline, CASE WHEN p.report_id IS NOT NULL THEN 1 ELSE 0 END, r.source
         FROM reports r
         LEFT JOIN report_summary s ON s.report_id = r.report_id
         LEFT JOIN report_pdf p ON p.report_id = r.report_id
         ORDER BY r.publication_ts DESC NULLS LAST
         OFFSET :off ROWS FETCH NEXT :lim ROWS ONLY
     """, {"off": offset, "lim": limit})
-    return [{"id": a, "title": b, "date": c, "headline": d, "has_pdf": bool(e)} for a, b, c, d, e in rows]
+    return [{"id": a, "title": b, "date": c, "headline": d, "has_pdf": bool(e), "source": f}
+            for a, b, c, d, e, f in rows]
 
 
 def search(term, limit=50):
     esc = term.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     rows = _rows("""
-        SELECT r.report_id, r.title, TO_CHAR(r.publication_date,'YYYY-MM-DD'), s.headline
+        SELECT r.report_id, r.title, TO_CHAR(r.publication_date,'YYYY-MM-DD'), s.headline, r.source
         FROM reports r
         JOIN report_text rt ON rt.report_id = r.report_id
         LEFT JOIN report_summary s ON s.report_id = r.report_id
@@ -100,7 +101,7 @@ def search(term, limit=50):
         ORDER BY r.publication_ts DESC NULLS LAST
         FETCH FIRST :lim ROWS ONLY
     """, {"q": "%" + esc + "%", "lim": limit})
-    return [{"id": a, "title": b, "date": c, "headline": d} for a, b, c, d in rows]
+    return [{"id": a, "title": b, "date": c, "headline": d, "source": e} for a, b, c, d, e in rows]
 
 
 def get_report(rid):
@@ -108,7 +109,7 @@ def get_report(rid):
         SELECT r.title, r.distribution_headline, r.authors,
                TO_CHAR(r.publication_date,'YYYY-MM-DD'), r.total_pages,
                r.source_path, r.download_path, s.summary_json,
-               CASE WHEN p.report_id IS NOT NULL THEN 1 ELSE 0 END
+               CASE WHEN p.report_id IS NOT NULL THEN 1 ELSE 0 END, r.source
         FROM reports r
         LEFT JOIN report_summary s ON s.report_id = r.report_id
         LEFT JOIN report_pdf p ON p.report_id = r.report_id
@@ -116,11 +117,12 @@ def get_report(rid):
     """, {"id": rid})
     if not rows:
         return None
-    title, headline, authors_b, date, pages, src, dl, sj, has_pdf = rows[0]
+    title, headline, authors_b, date, pages, src, dl, sj, has_pdf, source = rows[0]
     return {
         "id": rid, "title": title, "headline": headline,
         "authors": as_json(authors_b) or [],
-        "date": date, "pages": pages, "source": src, "download": dl,
+        "date": date, "pages": pages, "source_path": src, "download": dl,
+        "source": source,
         "summary": as_json(sj),
         "has_pdf": bool(has_pdf),
     }

@@ -10,7 +10,10 @@
       {% for r in rows %}
       <tr>
         <td class="date">{{ r.date or '' }}</td>
-        <td><a href="{{ url_for('report', rid=r.id) }}">{{ r.headline or r.title or '(untitled)' }}</a></td>
+        <td>
+          {% if r.source %}<span class="src">{{ r.source|upper }}</span>{% endif %}
+          <a href="{{ url_for('report', rid=r.id) }}">{{ r.headline or r.title or '(untitled)' }}</a>
+        </td>
       </tr>
       {% endfor %}
     </tbody>

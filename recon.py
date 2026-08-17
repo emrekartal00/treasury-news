@@ -1,10 +1,19 @@
-"""recon.py — one-time login + traffic capture.
+"""recon.py - one-time login + traffic capture (also the per-portal DISCOVERY tool).
 
 Opens Chrome with a PERSISTENT profile (./user-data) so the login session is reused by
-daily.py. Log in, reproduce your normal steps to reach a report, then CLOSE the window.
-Traffic is logged to recon/traffic.jsonl; any downloads land in downloads/.
+daily.py. Log in, reproduce your normal steps to reach the research LIST and open ONE
+report (so its PDF loads), then CLOSE the window.
 
-Run in Spyder (Run file) or:  python recon.py
+For DISCOVERY of a new portal, pass a source key or a start URL:
+  python recon.py                 # default: the gs 'My Content' page
+  python recon.py jpm             # a registered source's warm URL
+  python recon.py https://...     # any URL (portal not yet registered)
+
+It logs to recon/traffic.jsonl:
+  - request lines: method + url + (POST body, capped) for interesting endpoints
+  - response lines: status + url + content-type, and for JSON responses the BODY (capped)
+So you can spot the feed/list endpoint and see its shape. Paste the relevant lines back and
+I'll turn them into sources/<key>.py. Downloads (e.g. a clicked PDF) land in downloads/.
 """
 import json
 import re
@@ -12,15 +21,26 @@ import sys
 import time
 from pathlib import Path
 
-import config
+import config  # noqa: F401  # loads .env
+import sources
 from _util import run_in_thread
 
 HERE = Path(__file__).parent
-INTERESTING = re.compile(r"pdf|document|research|publication|content|/api/|\.json", re.I)
+INTERESTING = re.compile(r"pdf|document|research|publication|content|feed|stream|/api/|\.json", re.I)
+BODY_CAP = 6000  # chars of a JSON body to record (enough to see the item shape)
 
 
-def main() -> None:
-    start_url = sys.argv[1] if len(sys.argv) > 1 else config.HOMEPAGE
+def start_url_from_arg(arg):
+    if not arg:
+        return sources.get("gs").warm_url()
+    if arg in sources.keys():
+        return sources.get(arg).warm_url()
+    return arg  # treat as a raw URL
+
+
+def main():
+    arg = sys.argv[1] if len(sys.argv) > 1 else None
+    start_url = start_url_from_arg(arg)
     recon_dir = HERE / "recon"
     recon_dir.mkdir(exist_ok=True)
     (HERE / "downloads").mkdir(exist_ok=True)
@@ -30,9 +50,10 @@ def main() -> None:
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
-    print(f"\n▶ Opening Chrome (persistent profile ./user-data)")
-    print(f"▶ Start URL: {start_url}")
-    print("  Log in if needed, reproduce your steps to reach a report, then CLOSE the window.\n")
+    print("\n> Opening Chrome (persistent profile ./user-data)")
+    print(f"> Start URL: {start_url}")
+    print("  Log in if needed, open the research LIST and ONE report (let its PDF load), "
+          "then CLOSE the window.\n")
 
     from playwright.sync_api import sync_playwright
 
@@ -45,14 +66,39 @@ def main() -> None:
             viewport={"width": 1440, "height": 900},
         )
 
-        def on_response(res):
-            ct = res.headers.get("content-type", "")
-            if INTERESTING.search(res.url) or re.search(r"pdf|json", ct, re.I):
-                log({"t": int(time.time() * 1000), "kind": "response",
-                     "status": res.status, "url": res.url, "contentType": ct})
-                if re.search(r"application/pdf", ct, re.I):
-                    print(f"  📄 PDF response {res.status}: {res.url}")
+        def on_request(req):
+            try:
+                if not INTERESTING.search(req.url):
+                    return
+                entry = {"t": int(time.time() * 1000), "kind": "request",
+                         "method": req.method, "url": req.url}
+                if req.method in ("POST", "PUT"):
+                    body = req.post_data
+                    if body:
+                        entry["postData"] = body[:BODY_CAP]
+                log(entry)
+            except Exception:
+                pass
 
+        def on_response(res):
+            try:
+                ct = res.headers.get("content-type", "")
+                if not (INTERESTING.search(res.url) or re.search(r"pdf|json", ct, re.I)):
+                    return
+                entry = {"t": int(time.time() * 1000), "kind": "response",
+                         "status": res.status, "url": res.url, "contentType": ct}
+                if re.search(r"json", ct, re.I):
+                    try:
+                        entry["body"] = res.text()[:BODY_CAP]
+                    except Exception:
+                        pass
+                elif re.search(r"application/pdf", ct, re.I):
+                    print(f"  [pdf] {res.status}: {res.url}")
+                log(entry)
+            except Exception:
+                pass
+
+        ctx.on("request", on_request)
         ctx.on("response", on_response)
 
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
@@ -60,7 +106,7 @@ def main() -> None:
         def on_download(dl):
             name = dl.suggested_filename or f"download-{int(time.time() * 1000)}.pdf"
             dl.save_as(str(HERE / "downloads" / name))
-            print(f"  ⬇️  saved download: {name}")
+            print(f"  [saved] {name}")
             log({"t": int(time.time() * 1000), "kind": "download", "filename": name, "url": dl.url})
 
         page.on("download", on_download)
@@ -77,7 +123,7 @@ def main() -> None:
         except Exception:
             pass
 
-    print("\n✅ Browser closed. Review recon/traffic.jsonl")
+    print("\nDone. Review recon/traffic.jsonl (look for the list/feed JSON and the PDF URL).")
 
 
 if __name__ == "__main__":

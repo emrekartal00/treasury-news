@@ -1,16 +1,18 @@
-"""daily.py — poll the 'My Content' feed and download only newly-published items.
+"""daily.py - poll a source's feed and download only newly-published items.
 
-Dedupes by report id via state/seen.json, so it's safe to run repeatedly. Saves each item
-as HTML + PDF + meta.json under downloads/YYYY-MM-DD/.
+Source-agnostic: pick a portal with --source (default 'gs'); the per-portal specifics
+(feed URL, field mapping, content/PDF URLs) live in sources/<key>.py. Dedupes by native id
+via state/seen_<key>.json, so it's safe to re-run. Saves each item as HTML + PDF + meta.json
+under downloads/<key>/YYYY-MM-DD/.
 
 Run in Spyder (Run file) or:
-  python daily.py               # everything new since last run
-  python daily.py --days 3      # only items published in the last 3 days
-  python daily.py --max 10      # cap downloads this run
-  python daily.py --limit 50    # feed page size to scan
+  python daily.py                       # source 'gs', everything new since last run
+  python daily.py --source jpm          # a different portal
+  python daily.py --days 3              # only items published in the last 3 days
+  python daily.py --max 10             # cap downloads this run
+  python daily.py --limit 50           # feed page size to scan
 """
 import argparse
-import base64
 import json
 import os
 import random
@@ -19,36 +21,37 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import config
+import config  # noqa: F401  # loads .env
+import sources
 from _util import run_in_thread
 
 HERE = Path(__file__).parent
 STATE_DIR = HERE / "state"
-SEEN_PATH = STATE_DIR / "seen.json"
 
 
-def load_seen():
-    if SEEN_PATH.exists():
-        return json.loads(SEEN_PATH.read_text(encoding="utf-8"))
+def seen_path(source_key):
+    return STATE_DIR / f"seen_{source_key}.json"
+
+
+def load_seen(source_key):
+    p = seen_path(source_key)
+    if p.exists():
+        return json.loads(p.read_text(encoding="utf-8"))
     return {"ids": {}, "lastRun": None}
 
 
-def save_seen(seen):
+def save_seen(source_key, seen):
     STATE_DIR.mkdir(exist_ok=True)
-    SEEN_PATH.write_text(json.dumps(seen, indent=2, ensure_ascii=False), encoding="utf-8")
+    seen_path(source_key).write_text(
+        json.dumps(seen, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def slug(text):
     text = text or "report"
-    text = re.sub(r"[—–]", "-", text)      # em/en dash -> hyphen
+    text = re.sub("[\u2014\u2013]", "-", text)  # em/en dash -> hyphen
     text = re.sub(r"[^\w.-]+", "_", text)
     text = re.sub(r"_+", "_", text)
     return text[:90]
-
-
-def date_from_path(path):
-    m = re.search(r"/(\d{4})/(\d{2})/(\d{2})/", path or "")
-    return "-".join(m.groups()) if m else None
 
 
 def human_pause():
@@ -62,13 +65,19 @@ def now_iso():
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--source", default=os.environ.get("SOURCE", "gs"),
+                    help=f"portal to scrape ({', '.join(sources.keys())})")
     ap.add_argument("--limit", type=int, default=30)
     ap.add_argument("--max", type=int, default=100)
     ap.add_argument("--days", type=int, default=None)
+    ap.add_argument("--login", action="store_true",
+                    help="pause for interactive login in the opened browser before scraping "
+                         "(for portals whose session does not persist across launches, e.g. barc)")
     args, _ = ap.parse_known_args()  # tolerate Spyder-injected args
 
+    src = sources.get(args.source)   # raises with a helpful message on a bad key
     since_ms = (time.time() * 1000 - args.days * 86400000) if args.days is not None else None
-    seen = load_seen()
+    seen = load_seen(src.key)
 
     from playwright.sync_api import sync_playwright
 
@@ -85,45 +94,43 @@ def main():
         # Tunable for slow connections (milliseconds), overridable via .env.
         nav_timeout = int(os.environ.get("SCRAPE_NAV_TIMEOUT_MS", "90000"))
         warm_ms = int(os.environ.get("SCRAPE_WARM_MS", "6000"))
-        print("Opening My Content...")
-        try:
-            page.goto(config.MYCONTENT, wait_until="domcontentloaded", timeout=nav_timeout)
-        except Exception as exc:
-            print("  (goto note:", exc, ")")
-        page.wait_for_timeout(warm_ms)
+        print(f"Source: {src.label} ({src.key})")
+        print(f"Opening {src.warm_url()} ...")
+        src.warm(page, nav_timeout, warm_ms)
 
-        def fetch_page(offset):
-            # Fetch INSIDE the page (Chrome's network stack -> uses the corporate proxy and
-            # the logged-in cookies). ctx.request.get bypasses the system proxy -> ETIMEDOUT.
-            res = page.evaluate(
-                """async (u) => {
-                    const r = await fetch(u, { credentials: 'include' });
-                    return { status: r.status, ok: r.ok, body: await r.text() };
-                }""",
-                config.feed_url(offset, args.limit),
-            )
-            if not res["ok"]:
-                raise RuntimeError(f"feed {res['status']} at offset {offset}")
-            data = json.loads(res["body"]) if res["body"] else []
-            if isinstance(data, list):
-                return data
-            return data.get("results") or data.get("items") or []
+        # Scripted login for portals whose session does not persist across launches
+        # (e.g. barc): authenticates in THIS session from stored credentials. No-op for
+        # cookie-based portals or when credentials are not configured.
+        try:
+            if src.login(page, nav_timeout):
+                print("  logged in via stored credentials.")
+        except Exception as exc:
+            print("  (login note:", exc, ")")
 
         print("Reading feed...")
         feed = []
         # First page with retries: on a slow connection the session/feed may not be ready
-        # immediately after warming, and can come back empty. Retry before giving up.
+        # immediately after warming, and can come back empty. With --login we retry for much
+        # longer (silently) so you have time to log in in the visible browser window.
+        max_attempts = 60 if args.login else 4
+        if args.login:
+            print("\n>>> Log in in the browser window now. "
+                  "Waiting for an authenticated session (up to ~5 min)...")
         batch = []
-        for attempt in range(1, 5):
+        for attempt in range(1, max_attempts + 1):
             try:
-                batch = fetch_page(0)
+                batch = src.fetch_items(page, 0, args.limit)
             except Exception as exc:
-                print(f"  feed error (try {attempt}): {exc}")
                 batch = []
+                if not args.login:
+                    print(f"  feed error (try {attempt}): {exc}")
             if batch:
+                if args.login:
+                    print(f"    session authenticated ({len(batch)} items visible).")
                 break
-            if attempt < 4:
-                print(f"  feed empty; waiting 5s and retrying ({attempt}/4)")
+            if attempt < max_attempts:
+                if not args.login:
+                    print(f"  feed empty; waiting 5s and retrying ({attempt}/{max_attempts})")
                 page.wait_for_timeout(5000)
         feed.extend(batch)
         # Paginate further only when a --days window is set (one page is enough otherwise).
@@ -131,121 +138,95 @@ def main():
             offset = args.limit
             while offset < 300:
                 try:
-                    more = fetch_page(offset)
+                    more = src.fetch_items(page, offset, args.limit)
                 except Exception as exc:
                     print("  feed error:", exc)
                     break
                 if not more:
                     break
                 feed.extend(more)
-                oldest = min((x.get("publicationDateTime") or 0) for x in more)
+                oldest = min((src.pubdate_ms(x) or 0) for x in more)
                 if oldest < since_ms:
                     break
                 offset += args.limit
 
-        cands = [it for it in feed if it.get("id") and it["id"] not in seen["ids"]]
+        cands = [it for it in feed if src.native_id(it) and src.native_id(it) not in seen["ids"]]
         if since_ms:
-            cands = [it for it in cands if (it.get("publicationDateTime") or 0) >= since_ms]
-        cands.sort(key=lambda it: it.get("publicationDateTime") or 0, reverse=True)
+            cands = [it for it in cands if (src.pubdate_ms(it) or 0) >= since_ms]
+        cands.sort(key=lambda it: src.pubdate_ms(it) or 0, reverse=True)
         cands = cands[: args.max]
 
         window = f" (last {args.days}d)" if since_ms else ""
-        tail = "" if cands else " — nothing to do."
-        print(f"▶ Feed items: {len(feed)} | new & unseen: {len(cands)}{window}{tail}")
+        tail = "" if cands else " - nothing to do."
+        print(f"> Feed items: {len(feed)} | new & unseen: {len(cands)}{window}{tail}")
 
         done = 0
         for it in cands:
-            date = date_from_path(it.get("path")) or datetime.fromtimestamp(
-                (it.get("publicationDateTime") or time.time() * 1000) / 1000, tz=timezone.utc
-            ).strftime("%Y-%m-%d")
-            out_dir = HERE / "downloads" / date
+            native = src.native_id(it)
+            date = src.date(it)
+            out_dir = HERE / "downloads" / src.key / date
             out_dir.mkdir(parents=True, exist_ok=True)
-            base = out_dir / f"{slug(it.get('title') or it.get('distributionHeadline'))}_{it['id'][:8]}"
-            html_url = config.ORIGIN + it["path"]
-            pdf_url = config.ORIGIN + it["downloadPath"] if it.get("downloadPath") else None
-            print(f"\n• {date}  {it.get('title') or it.get('distributionHeadline')}")
+            meta = src.normalize(it)
+            title = meta.get("title") or meta.get("distributionHeadline")
+            base = out_dir / f"{slug(title)}_{str(native)[:8]}"
+            html_url = src.content_url(it)
+            pdf_url = src.pdf_url(it)
+            print(f"\n- {date}  {title}")
 
             # HTML: navigate so the SPA authorizes the content route, then save rendered DOM.
             html_bytes = 0
-            try:
-                page.goto(html_url, wait_until="domcontentloaded", timeout=nav_timeout)
+            html_ok = False
+            if html_url:
                 try:
-                    page.wait_for_function(
-                        "() => document.title && !/login/i.test(document.title) "
-                        "&& document.body.innerText.length > 500",
-                        timeout=45000,
-                    )
-                except Exception:
-                    pass
-                page.wait_for_timeout(2000)
-                html = ""
-                for _ in range(5):
-                    try:
-                        html = page.content()
-                    except Exception:
-                        html = ""
-                    if html:
-                        break
-                    page.wait_for_timeout(1500)
-                Path(f"{base}.html").write_text(html, encoding="utf-8")
-                html_bytes = len(html.encode("utf-8"))
-                print(f"    ✓ html ({html_bytes} bytes)")
-            except Exception as exc:
-                print(f"    ✗ html failed: {exc}")
+                    html = src.fetch_html(page, html_url, nav_timeout)
+                    Path(f"{base}.html").write_text(html, encoding="utf-8")
+                    html_bytes = len(html.encode("utf-8"))
+                    html_ok = True  # fetch completed (even if the body was empty)
+                    print(f"    ok html ({html_bytes} bytes)")
+                except Exception as exc:
+                    print(f"    x html failed: {exc}")
 
-            # PDF: direct authenticated GET (works with cookies).
+            # PDF: in-page fetch (inherits proxy + cookies), returned as base64.
             pdf_info = None
             if pdf_url:
                 try:
-                    # Fetch the PDF inside the page too (proxy + cookies); return base64.
-                    res = page.evaluate(
-                        """async (u) => {
-                            const r = await fetch(u, { credentials: 'include' });
-                            const buf = new Uint8Array(await r.arrayBuffer());
-                            let bin = '';
-                            const CH = 0x8000;
-                            for (let i = 0; i < buf.length; i += CH) {
-                                bin += String.fromCharCode.apply(null, buf.subarray(i, i + CH));
-                            }
-                            return { status: r.status, b64: btoa(bin) };
-                        }""",
-                        pdf_url,
-                    )
-                    body = base64.b64decode(res["b64"])
+                    body, status = src.fetch_pdf(page, pdf_url)
                     is_pdf = body[:5] == b"%PDF-"
                     Path(f"{base}." + ("pdf" if is_pdf else "pdf.html")).write_bytes(body)
-                    pdf_info = {"status": res["status"], "bytes": len(body), "isPdf": is_pdf}
+                    pdf_info = {"status": status, "bytes": len(body), "isPdf": is_pdf}
                     note = "" if is_pdf else ", NOT a real pdf"
-                    print(f"    ✓ pdf ({len(body)} bytes{note})")
+                    print(f"    ok pdf ({len(body)} bytes{note})")
                 except Exception as exc:
-                    print(f"    ✗ pdf failed: {exc}")
+                    print(f"    x pdf failed: {exc}")
 
-            meta = {
-                "id": it["id"], "title": it.get("title"),
-                "distributionHeadline": it.get("distributionHeadline"),
-                "date": date, "publicationDateTime": it.get("publicationDateTime"),
-                "authors": it.get("authors"), "synopsis": it.get("synopsis"),
-                "reportTypes": it.get("reportTypes"), "totalPages": it.get("totalPages"),
-                "htmlUrl": html_url, "pdfUrl": pdf_url, "htmlBytes": html_bytes,
-                "pdf": pdf_info, "fetchedAt": now_iso(),
-            }
+            meta.update({
+                "date": date,
+                "htmlUrl": html_url, "pdfUrl": pdf_url,
+                "htmlBytes": html_bytes, "pdf": pdf_info, "fetchedAt": now_iso(),
+            })
             Path(f"{base}.meta.json").write_text(
-                json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+                json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-            # Only mark seen if we actually captured something, so a slow/failed download
-            # retries next run instead of being silently skipped forever.
-            if html_bytes > 0 or pdf_info is not None:
-                seen["ids"][it["id"]] = {"date": date, "title": it.get("title"), "fetchedAt": now_iso()}
-                save_seen(seen)
+            # Mark seen if we captured content, so a slow/failed download retries next run
+            # instead of being skipped forever. For sources with mark_seen_on_empty, a
+            # completed-but-empty fetch (a text-less item) also counts, so it isn't re-tried.
+            captured = html_bytes > 0 or pdf_info is not None
+            if captured:
+                seen["ids"][native] = {"date": date, "title": title, "fetchedAt": now_iso()}
+                save_seen(src.key, seen)
                 done += 1
+            elif src.mark_seen_on_empty and html_ok:
+                seen["ids"][native] = {"date": date, "title": title, "fetchedAt": now_iso()}
+                save_seen(src.key, seen)
+                print("    (no body content - marked seen, skipped)")
             else:
                 print("    (nothing captured - kept unseen, will retry next run)")
             human_pause()
 
         seen["lastRun"] = now_iso()
-        save_seen(seen)
-        print(f"\n✅ Done. Downloaded {done} new item(s). Total tracked: {len(seen['ids'])}.")
+        save_seen(src.key, seen)
+        print(f"\nDone. Downloaded {done} new item(s) from {src.key}. "
+              f"Total tracked: {len(seen['ids'])}.")
         ctx.close()
 
 
