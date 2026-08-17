@@ -22,10 +22,9 @@ def index():
         page = 1
     per = 25
     rows = db.recent(per, (page - 1) * per)
-    date = db.latest_digest_date()
-    digest = db.get_digest(date) if date else None
-    return render_template("index.html", rows=rows, page=page, has_next=len(rows) == per,
-                           digest=digest, digest_date=date)
+    today = db.todays_by_source() if page == 1 else {}  # today's block only on the first page
+    return render_template("index.html", rows=rows, page=page,
+                           has_next=len(rows) == per, today=today)
 
 
 @app.route("/search")

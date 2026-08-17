@@ -1,28 +1,32 @@
 {% extends "base.html" %}
 {% block content %}
-{% if digest %}
-<section class="digest">
-  <h1>Latest digest &middot; {{ digest_date }}</h1>
-  <p class="meta">
-    {{ digest.counts.total }} report(s)
-    {%- if digest.counts.by_stance %} &middot;
-      {% for k, v in digest.counts.by_stance.items() %}{{ k }} {{ v }}{% if not loop.last %}, {% endif %}{% endfor %}
-    {%- endif %}
-    &middot; <a href="{{ url_for('digest', date=digest_date) }}">open</a>
-  </p>
-  <ul class="items">
-    {% for it in digest['items'] %}
-    <li>
-      <a href="{{ url_for('report', rid=it.report_id) }}">{{ it.headline }}</a>
-      <span class="stance">{{ it.stance }}</span>
-    </li>
-    {% endfor %}
-  </ul>
+{% if today %}
+<section class="today">
+  <h1>Today&rsquo;s research</h1>
+  {% for src, items in today.items() %}
+  <div class="src-group">
+    <h2>{{ src|upper }} <span class="count">{{ items|length }}</span></h2>
+    <table class="reports">
+      <tbody>
+        {% for r in items %}
+        <tr>
+          <td class="date">{{ r.date or '' }}</td>
+          <td><a href="{{ url_for('report', rid=r.id) }}">{{ r.title or r.dhead or '(untitled)' }}</a></td>
+          <td class="pdf">{% if r.has_pdf %}<a href="{{ url_for('report_pdf', rid=r.id) }}">PDF</a>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endfor %}
 </section>
+{% elif page == 1 %}
+<h1>Today&rsquo;s research</h1>
+<p class="empty">No reports published today.</p>
 {% endif %}
 
 <section>
-  <h2>Recent reports</h2>
+  <h2>Earlier reports</h2>
   {% if rows %}
   <table class="reports">
     <tbody>
@@ -31,7 +35,7 @@
         <td class="date">{{ r.date or '' }}</td>
         <td>
           {% if r.source %}<span class="src">{{ r.source|upper }}</span>{% endif %}
-          <a href="{{ url_for('report', rid=r.id) }}">{{ r.headline or r.title or '(untitled)' }}</a>
+          <a href="{{ url_for('report', rid=r.id) }}">{{ r.title or r.dhead or '(untitled)' }}</a>
         </td>
         <td class="pdf">{% if r.has_pdf %}<a href="{{ url_for('report_pdf', rid=r.id) }}">PDF</a>{% endif %}</td>
       </tr>
@@ -43,7 +47,7 @@
     {% if has_next %}<a href="?page={{ page + 1 }}">Older &rarr;</a>{% endif %}
   </nav>
   {% else %}
-  <p class="empty">No reports yet. Run the pipeline to populate the archive.</p>
+  <p class="empty">No earlier reports. Run the pipeline to populate the archive.</p>
   {% endif %}
 </section>
 {% endblock %}

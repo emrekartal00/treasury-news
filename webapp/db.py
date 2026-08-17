@@ -6,6 +6,7 @@ queries stay unqualified. The web-app DB user only needs SELECT on the tables.
 import json
 import os
 import re
+from collections import OrderedDict
 from pathlib import Path
 
 import oracledb
@@ -77,17 +78,39 @@ def ping():
 
 
 def recent(limit=25, offset=0):
+    """Earlier reports (excludes today's — those are shown grouped by source up top).
+    Shows the report's own heading (title / distribution_headline), not the AI summary line."""
     rows = _rows("""
-        SELECT r.report_id, r.title, TO_CHAR(r.publication_date,'YYYY-MM-DD'),
-               s.headline, CASE WHEN p.report_id IS NOT NULL THEN 1 ELSE 0 END, r.source
+        SELECT r.report_id, r.title, r.distribution_headline,
+               TO_CHAR(r.publication_date,'YYYY-MM-DD'),
+               CASE WHEN p.report_id IS NOT NULL THEN 1 ELSE 0 END, r.source
         FROM reports r
-        LEFT JOIN report_summary s ON s.report_id = r.report_id
         LEFT JOIN report_pdf p ON p.report_id = r.report_id
+        WHERE r.publication_date < TRUNC(SYSDATE) OR r.publication_date IS NULL
         ORDER BY r.publication_ts DESC NULLS LAST
         OFFSET :off ROWS FETCH NEXT :lim ROWS ONLY
     """, {"off": offset, "lim": limit})
-    return [{"id": a, "title": b, "date": c, "headline": d, "has_pdf": bool(e), "source": f}
+    return [{"id": a, "title": b, "dhead": c, "date": d, "has_pdf": bool(e), "source": f}
             for a, b, c, d, e, f in rows]
+
+
+def todays_by_source():
+    """Today's reports (the DB's current date), grouped by source, newest first in each group.
+    Shows the report's own heading, not the AI summary line."""
+    rows = _rows("""
+        SELECT r.source, r.report_id, TO_CHAR(r.publication_date,'YYYY-MM-DD'),
+               r.title, r.distribution_headline,
+               CASE WHEN p.report_id IS NOT NULL THEN 1 ELSE 0 END
+        FROM reports r
+        LEFT JOIN report_pdf p ON p.report_id = r.report_id
+        WHERE r.publication_date = TRUNC(SYSDATE)
+        ORDER BY r.source, r.publication_ts DESC NULLS LAST
+    """)
+    groups = OrderedDict()
+    for src, rid, date, title, dhead, has_pdf in rows:
+        groups.setdefault(src or "gs", []).append(
+            {"id": rid, "date": date, "title": title, "dhead": dhead, "has_pdf": bool(has_pdf)})
+    return groups
 
 
 def search(term, limit=50):
