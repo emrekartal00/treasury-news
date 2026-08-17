@@ -13,6 +13,22 @@ app = Flask(__name__)
 # Accept a bare GS UUID, or a namespaced multi-source id like "jpm:1a2b..." / "citi:ABC-1".
 _RID = re.compile(r"^(?:[0-9a-fA-F-]{36}|[a-z0-9]{1,20}:[A-Za-z0-9._:-]{1,120})$")
 
+# Source key -> display name (used by the `source_name` template filter).
+SOURCE_NAMES = {
+    "gs": "Goldman Sachs",
+    "jpm": "J.P. Morgan",
+    "citi": "Citi",
+    "barc": "Barclays",
+    "ms": "Morgan Stanley",
+    "db": "Deutsche Bank",
+}
+
+
+@app.template_filter("source_name")
+def source_name(key):
+    key = (key or "").lower()
+    return SOURCE_NAMES.get(key, key.upper())
+
 
 @app.route("/")
 def index():

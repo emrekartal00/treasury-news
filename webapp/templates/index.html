@@ -5,7 +5,7 @@
   <h1>Today&rsquo;s research</h1>
   {% for src, items in today.items() %}
   <div class="src-group">
-    <h2>{{ src|upper }} <span class="count">{{ items|length }}</span></h2>
+    <h2>{{ src|source_name }} <span class="count">{{ items|length }}</span></h2>
     <table class="reports">
       <tbody>
         {% for r in items %}
@@ -34,7 +34,7 @@
       <tr>
         <td class="date">{{ r.date or '' }}</td>
         <td>
-          {% if r.source %}<span class="src">{{ r.source|upper }}</span>{% endif %}
+          {% if r.source %}<span class="src">{{ r.source|source_name }}</span>{% endif %}
           <a href="{{ url_for('report', rid=r.id) }}">{{ r.title or r.dhead or '(untitled)' }}</a>
         </td>
         <td class="pdf">{% if r.has_pdf %}<a href="{{ url_for('report_pdf', rid=r.id) }}">PDF</a>{% endif %}</td>

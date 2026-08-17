@@ -51,7 +51,8 @@ td.pdf{text-align:right;width:48px;font-family:var(--mono);font-size:12px}
   color:var(--accent);vertical-align:middle;margin-right:6px}
 .today{margin-bottom:10px}
 .src-group{margin:0 0 16px}
-.src-group h2{margin-top:22px}
+.src-group h2{margin-top:22px;font-family:var(--sans);text-transform:none;
+  letter-spacing:-.01em;font-size:15px;color:var(--text)}
 .src-group h2 .count{font-family:var(--mono);font-size:11px;font-weight:400;color:var(--muted)}
 .report .summary p{max-width:80ch}
 .report .summary ul{max-width:80ch}
