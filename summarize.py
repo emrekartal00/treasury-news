@@ -59,18 +59,22 @@ def validate(obj):
     }
 
 
-def pending(cur, limit):
-    # Only summarize reports inside the active publication window (see window.py). A fresh run
-    # scrapes a 5-day buffer, but we only spend the LLM on what could go in today's email.
-    cur.execute("""
+def pending(cur, limit, cutoff=None):
+    """Reports needing a summary (have text, no summary row). `cutoff` (YYYY-MM-DD) limits to
+    reports published on/after it; None = no date limit (a full backfill)."""
+    where = "WHERE s.report_id IS NULL AND rt.plain_text IS NOT NULL"
+    binds = {}
+    if cutoff is not None:
+        where += " AND r.publication_date >= TO_DATE(:cutoff, 'YYYY-MM-DD')"
+        binds["cutoff"] = cutoff
+    cur.execute(f"""
         SELECT r.report_id, r.title, r.distribution_headline, rt.plain_text
         FROM reports r
         JOIN report_text rt ON rt.report_id = r.report_id
         LEFT JOIN report_summary s ON s.report_id = r.report_id
-        WHERE s.report_id IS NULL AND rt.plain_text IS NOT NULL
-          AND r.publication_date >= TO_DATE(:cutoff, 'YYYY-MM-DD')
+        {where}
         ORDER BY r.publication_ts DESC
-    """, {"cutoff": window.min_pub_date()})
+    """, binds)
     rows = cur.fetchall()
     return rows[:limit] if limit else rows
 
@@ -109,12 +113,26 @@ NO_CONTENT = {"headline": "NO_CONTENT", "key_points": [], "instruments": [],
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--days", type=int, default=None,
+                    help="backfill: summarize reports published in the last N days "
+                         "(overrides the normal active window)")
+    ap.add_argument("--all", action="store_true",
+                    help="backfill: summarize ALL un-summarized reports, ignore the date window")
     args, _ = ap.parse_known_args()
+
+    if args.all:
+        cutoff = None                                   # full backfill
+    elif args.days is not None:
+        from datetime import date, timedelta
+        cutoff = (date.today() - timedelta(days=args.days)).isoformat()
+    else:
+        cutoff = window.min_pub_date()                  # normal daily window
 
     con = db_conn.connect()
     cur = con.cursor()
-    rows = pending(cur, args.limit)
-    print(f"{len(rows)} report(s) need a summary.")
+    rows = pending(cur, args.limit, cutoff)
+    scope = "all dates" if cutoff is None else f"published >= {cutoff}"
+    print(f"{len(rows)} report(s) need a summary ({scope}).")
     ok = skipped = fail = 0
     for rid, title, headline, text in rows:
         try:
