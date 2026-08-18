@@ -71,7 +71,7 @@ def pending(cur, limit):
     return rows[:limit] if limit else rows
 
 
-def store_summary(con, rid, data, tokens):
+def store_summary(con, rid, data, tokens, status="OK"):
     cur = con.cursor()
     sj = json.dumps(data, ensure_ascii=False).encode("utf-8")
     cur.setinputsizes(sj=oracledb.DB_TYPE_BLOB, hl=oracledb.DB_TYPE_NVARCHAR)
@@ -79,15 +79,27 @@ def store_summary(con, rid, data, tokens):
         MERGE INTO report_summary t USING (SELECT :id AS report_id FROM dual) s
         ON (t.report_id = s.report_id)
         WHEN MATCHED THEN UPDATE SET summary_json=:sj, headline=:hl, model=:m, prompt_ver=:pv,
-             input_tokens=:it, generated_at=SYSTIMESTAMP, status='OK'
+             input_tokens=:it, generated_at=SYSTIMESTAMP, status=:status
         WHEN NOT MATCHED THEN INSERT (report_id, summary_json, headline, model, prompt_ver,
              input_tokens, generated_at, status)
-        VALUES (:id, :sj, :hl, :m, :pv, :it, SYSTIMESTAMP, 'OK')
+        VALUES (:id, :sj, :hl, :m, :pv, :it, SYSTIMESTAMP, :status)
     """, {"id": rid, "sj": sj, "hl": data["headline"], "m": MODEL_LABEL,
-          "pv": PROMPT_VER, "it": tokens})
+          "pv": PROMPT_VER, "it": tokens, "status": status})
     cur.execute("UPDATE reports SET status='SUMMARIZED' WHERE report_id=:id", {"id": rid})
     con.commit()
     cur.close()
+
+
+def is_no_content(obj):
+    """The summary prompt returns a NO_CONTENT object when the input isn't research
+    (failed extraction, disclaimers only, etc.)."""
+    o = obj or {}
+    return (str(o.get("headline", "")).strip().upper() == "NO_CONTENT"
+            or str(o.get("one_paragraph", "")).strip().upper() == "NO_CONTENT")
+
+
+NO_CONTENT = {"headline": "NO_CONTENT", "key_points": [], "instruments": [],
+              "stance": "n/a", "risk_flags": [], "one_paragraph": "NO_CONTENT"}
 
 
 def main():
@@ -99,7 +111,7 @@ def main():
     cur = con.cursor()
     rows = pending(cur, args.limit)
     print(f"{len(rows)} report(s) need a summary.")
-    ok = fail = 0
+    ok = skipped = fail = 0
     for rid, title, headline, text in rows:
         try:
             user = build_user(title, headline, text)
@@ -107,7 +119,15 @@ def main():
             content, finish = ai.chat(SYSTEM_PROMPT, user, max_tokens=2048)
             if finish == "length":
                 raise ai.LLMError("truncated output (finish_reason=length)")
-            data = validate(ai.parse_json(content))
+            obj = ai.parse_json(content)
+            # Non-research / failed extraction: store as NO_CONTENT so it is not retried and
+            # stays out of the digest (which only takes status='OK').
+            if is_no_content(obj):
+                store_summary(con, rid, NO_CONTENT, tokens, status="NO_CONTENT")
+                skipped += 1
+                print(f"  [skip] {rid[:8]}  NO_CONTENT")
+                continue
+            data = validate(obj)
             store_summary(con, rid, data, tokens)
             ok += 1
             print(f"  [ok]   {rid[:8]}  {data['stance']:8} {data['headline'][:60]}")
@@ -116,7 +136,7 @@ def main():
             print(f"  [FAIL] {rid[:8]}  {exc}")
     cur.close()
     con.close()
-    print(f"\nSummarize done. ok={ok} failed={fail}")
+    print(f"\nSummarize done. ok={ok} skipped(NO_CONTENT)={skipped} failed={fail}")
 
 
 if __name__ == "__main__":
