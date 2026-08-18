@@ -85,24 +85,6 @@ _CANVAS = "#f7f6f2"
 _CARD = "#ffffff"
 _SERIF = "Georgia,'Times New Roman',serif"
 _SANS = "Arial,Helvetica,sans-serif"
-_STANCE = {
-    "bullish": ("Bullish", "#1c6b45"),
-    "bearish": ("Bearish", "#9c2b2b"),
-    "neutral": ("Neutral", "#6f6b64"),
-    "mixed": ("Mixed", "#9a6a1c"),
-    "n/a": ("N/A", "#8a857c"),
-}
-
-
-def _badge(stance):
-    # Mixed-case label (no text-transform): all-caps + heavy tracking read poorly, and
-    # CSS uppercasing under a Turkish system locale turns "Bullish" -> "BULLISH" with a
-    # dotted capital I. Rendering the label as-is is both more legible and locale-proof.
-    label, color = _STANCE.get((stance or "n/a").lower(), _STANCE["n/a"])
-    return (f'<span style="font-family:{_SANS};font-size:12px;font-weight:bold;'
-            f'letter-spacing:.01em;color:{color};'
-            f'border:1px solid {color};border-radius:4px;padding:3px 10px;white-space:nowrap;">'
-            f'{label}</span>')
 
 
 def _button(read_href):
@@ -139,24 +121,18 @@ def _card(r, base_url):
     read = f"{base_url}/reports/{rid}" if base_url else (r.get("source_path") or "#")
     title = esc(r.get("title") or r.get("headline") or "(untitled)")
     authors = esc(", ".join(r["authors"])) if r.get("authors") else ""
-    badge = _badge(s.get("stance")) if s.get("stance") else ""
     src_label = esc((r.get("source") or "").upper())
 
     inner = [f'<a href="{esc(read)}" style="font-family:{_SANS};font-size:18px;line-height:1.35;'
              f'font-weight:bold;color:{_INK};text-decoration:none;">{title}</a>']
-    if authors or badge or src_label:
+    if authors or src_label:
         src_html = (f'<span style="font-family:{_SANS};font-size:11px;font-weight:bold;'
                     f'letter-spacing:.05em;color:{_ACCENT};">{src_label}</span>'
                     if src_label else "")
         sep = ' &nbsp;&middot;&nbsp; ' if (src_label and authors) else ""
-        left = (f'{src_html}{sep}'
-                f'<span style="font-family:{_SANS};font-size:12px;color:{_MUTED};">{authors}</span>'
-                if (authors or src_label) else "")
         inner.append(
-            '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" '
-            'style="margin:8px 0 12px;"><tr>'
-            f'<td valign="middle">{left}</td>'
-            f'<td valign="middle" align="right">{badge}</td></tr></table>')
+            f'<div style="margin:8px 0 12px;">{src_html}{sep}'
+            f'<span style="font-family:{_SANS};font-size:12px;color:{_MUTED};">{authors}</span></div>')
     if s.get("one_paragraph"):
         inner.append(f'<div style="font-family:{_SANS};font-size:15px;line-height:1.6;'
                      f'color:{_BODY};">{esc(s["one_paragraph"])}</div>')
@@ -177,22 +153,14 @@ def _card(r, base_url):
 def render(overview, reports, base_url):
     date = esc(overview.get("date", ""))
     n = overview.get("counts", {}).get("total", len(reports))
-    by = overview.get("counts", {}).get("by_stance", {}) or {}
-
-    summ = []
-    for st in ("bullish", "bearish", "neutral", "mixed"):
-        if by.get(st):
-            label, color = _STANCE[st]
-            summ.append(f'<span style="color:{color};">{by[st]} {label.lower()}</span>')
-    summ_html = (" &nbsp;&middot;&nbsp; " + " &nbsp; ".join(summ)) if summ else ""
 
     masthead = (
         f'<div style="font-family:{_SANS};font-size:11px;font-weight:bold;letter-spacing:.22em;'
-        f'color:{_ACCENT};">RESEARCH DIGEST</div>'
+        f'color:{_ACCENT};">DAILY RESEARCH DIGEST</div>'
         f'<div style="font-family:{_SERIF};font-size:26px;line-height:1.15;color:{_INK};'
         f'margin:6px 0 3px;">{date}</div>'
         f'<div style="font-family:{_SANS};font-size:13px;color:{_MUTED};">'
-        f'{n} report{"s" if n != 1 else ""}{summ_html}</div>'
+        f'{n} report{"s" if n != 1 else ""}</div>'
         f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" '
         f'style="margin:14px 0 22px;"><tr>'
         f'<td height="2" bgcolor="{_ACCENT}" style="font-size:0;line-height:0;">&nbsp;</td>'
@@ -214,11 +182,7 @@ def render(overview, reports, base_url):
         f'<tr><td style="padding:14px 0;font-family:{_SANS};font-size:11px;line-height:1.6;'
         f'color:{_MUTED};">Internal use only.{digest_link}</td></tr></table>')
 
-    disclaimer = (f'<div style="font-family:{_SANS};font-size:12px;font-style:italic;'
-                  f'color:{_MUTED};line-height:1.5;margin:2px 0 22px;">These summaries are '
-                  f'AI-generated - please read the full report for important information.</div>')
-
-    pre = f"{n} new GS research report{'s' if n != 1 else ''} for {overview.get('date','')}."
+    pre = f"{n} new research report{'s' if n != 1 else ''} for {overview.get('date','')}."
     preheader = (f'<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;'
                  f'font-size:1px;line-height:1px;color:{_CANVAS};">{esc(pre)}'
                  + "&nbsp;&zwnj;" * 30 + '</div>')
@@ -237,12 +201,12 @@ def render(overview, reports, base_url):
         'width="1200"><tr><td><![endif]-->'
         '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="1200" '
         'style="width:1200px;max-width:1200px;">'
-        f'<tr><td style="padding:0 8px;">{masthead}{disclaimer}{"".join(cards)}{footer}</td></tr></table>'
+        f'<tr><td style="padding:0 8px;">{masthead}{"".join(cards)}{footer}</td></tr></table>'
         '<!--[if mso]></td></tr></table><![endif]-->'
         '</td></tr></table></body></html>')
 
     # plain-text fallback (Outlook uses HTMLBody; kept for completeness)
-    text = [f"GS Research Digest - {overview.get('date','')} - {n} report(s)", ""]
+    text = [f"Daily Research Digest - {overview.get('date','')} - {n} report(s)", ""]
     for r in reports:
         s = r.get("summary") or {}
         text.append("* " + (r.get("title") or r.get("headline") or "(untitled)"))
@@ -324,7 +288,7 @@ def main():
     overview["counts"] = count_stances(reports)
 
     base = os.environ.get("WEBAPP_BASE_URL", "").rstrip("/")
-    subject = f"GS Research Digest - {date_str} - {len(reports)} report(s)"
+    subject = f"Daily Research Digest - {date_str} - {len(reports)} report(s)"
     html, text = render(overview, reports, base)
 
     log_id = str(uuid.uuid4())

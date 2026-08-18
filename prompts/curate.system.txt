@@ -74,19 +74,26 @@ the one whose abstract names more numbers or levels. Exclude the other.
 Reason: "duplicate"
 Two reports on the same market with different calls are not duplicates. Keep both.
 
-RULE 7. ORDER THE SURVIVORS.
-Put each survivor in a tier, then sort by date, latest date first, inside the tier.
+RULE 7. ORDER THE SURVIVORS BY REGION.
+Put each survivor in a region tier below, then sort by date, latest date first, inside the
+tier. This region order is mandatory - it is the order of the email.
 
-  Tier 1  TRY, CBRT, Turkish inflation, Turkish government bonds, Turkish banks, Turkish
-          current account, Turkish sovereign ratings, Turkish issuance, Turkish growth,
-          Turkish budget.
-  Tier 2  USD, EUR, JPY, CNY, CNH, Fed, ECB, BoJ, PBoC, US Treasuries, Bunds, JGBs,
-          Chinese government bonds, crude oil, natural gas, gold, EM FX, EM debt,
-          global rates, global risk appetite.
-  Tier 3  every survivor not listed in Tier 1 or Tier 2.
+  Tier 1  TURKEY: TRY, CBRT, Turkish inflation, Turkish government bonds, Turkish banks,
+          Turkish current account, Turkish sovereign ratings, Turkish issuance, Turkish
+          growth, Turkish budget.
+  Tier 2  US / USD: the US economy, Fed or FOMC, US Treasuries, USD, US inflation or CPI,
+          US labour market.
+  Tier 3  EUROPE: EUR, ECB, Bunds and other euro-area government bonds, the UK / GBP / BoE /
+          gilts, and any other European economy or central bank.
+  Tier 4  JAPAN: JPY, BoJ, JGBs, the Japanese economy.
+  Tier 5  EVERYTHING ELSE: China and the rest of Asia, other EM, commodities, gold, global
+          cross-asset, and anything not in Tiers 1 to 4.
 
-If a survivor matches more than one tier, put it in the lowest numbered tier it matches.
-Output order: all of Tier 1, then all of Tier 2, then all of Tier 3.
+If a survivor matches more than one tier, put it in the LOWEST numbered tier it matches
+(example: EUR/USD goes to Tier 2 US, because US outranks Europe).
+China and non-Japan Asia are always Tier 5; they must NEVER appear ahead of a Turkey, US,
+Europe or Japan report.
+Output order: all of Tier 1, then Tier 2, then Tier 3, then Tier 4, then Tier 5.
 
 ================================================================
 OUTPUT

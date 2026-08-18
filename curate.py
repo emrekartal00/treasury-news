@@ -17,6 +17,7 @@ outbound email. Fail-open: if the LLM is unavailable, mail the newest MAX_INCLUD
 Disable entirely with CURATE_EMAIL=0. ai.py is not touched by this module.
 """
 import os
+import re
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -26,6 +27,33 @@ HERE = Path(__file__).parent
 SYSTEM_PROMPT = (HERE / "prompts" / "curate.system.txt").read_text(encoding="utf-8")
 
 MAX_INCLUDED = 10   # hard cap: only the top-ranked N reports go in the email
+
+# Mandatory email order: Turkey -> US/USD -> Europe -> Japan -> everything else. The model is
+# asked to rank this way too, but this deterministic sort GUARANTEES it (China / non-Japan Asia
+# can never come first). First matching pattern wins, so lower tiers outrank higher ones.
+_REGIONS = [
+    re.compile(r"\bTRY\b|CBRT|Turk|Türk|Turkiye|\blira\b", re.I),                    # Turkey
+    re.compile(r"\bUSD\b|\bUST\b|\bFed\b|FOMC|Treasur|\bdollar\b|United States", re.I),   # US
+    re.compile(r"\bEUR\b|\bECB\b|\bBund|\beuro\b|German|France|French|Ital|Spain|"
+               r"\bGBP\b|\bBoE\b|\bgilt|United Kingdom|\bU\.?K\.?\b|Britain|Europe", re.I),  # Europe
+    re.compile(r"\bJPY\b|\bBoJ\b|\bJGB\b|Japan|\byen\b", re.I),                           # Japan
+]
+
+
+def _region_rank(r):
+    s = r.get("summary") or {}
+    text = " ".join([r.get("title") or "", r.get("headline") or "",
+                     " ".join(str(x) for x in (s.get("instruments") or [])),
+                     s.get("one_paragraph") or ""])
+    for i, pat in enumerate(_REGIONS):
+        if pat.search(text):
+            return i
+    return len(_REGIONS)   # everything else
+
+
+def _region_sort(reports):
+    """Stable sort into the mandatory region order (ties keep the model's within-region rank)."""
+    return sorted(reports, key=_region_rank)
 
 
 def enabled():
@@ -125,14 +153,14 @@ def select(reports, verbose=True, today=None):
     except Exception as exc:
         if verbose:
             print(f"[curate] LLM unavailable ({exc}); mailing newest {MAX_INCLUDED} survivor(s).")
-        return survivors[:MAX_INCLUDED]
+        return _region_sort(survivors)[:MAX_INCLUDED]
 
-    ranked = [survivors[i - 1] for i in order]        # topic-relevant, tiered, best first
-    selected = ranked[:MAX_INCLUDED]                  # code cap
+    ranked = [survivors[i - 1] for i in order]        # topic-relevant, model's ranking
+    selected = _region_sort(ranked)[:MAX_INCLUDED]    # enforce region order, then cap
     if verbose:
         for rank, r in enumerate(selected, 1):
             title = (r.get("title") or r.get("headline") or "(untitled)")[:60]
             print(f"[curate] mail #{rank}  {title}")
         print(f"[curate] {n} in window -> AI kept {len(ranked)} relevant "
-              f"-> mailing top {len(selected)} (cap {MAX_INCLUDED}).")
+              f"-> region-ordered, mailing top {len(selected)} (cap {MAX_INCLUDED}).")
     return selected
