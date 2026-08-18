@@ -69,10 +69,10 @@ def main():
                     help=f"portal to scrape ({', '.join(sources.keys())})")
     ap.add_argument("--limit", type=int, default=30)
     ap.add_argument("--max", type=int, default=100)
-    ap.add_argument("--days", type=int,
-                    default=int(os.environ["SCRAPE_DAYS"]) if os.environ.get("SCRAPE_DAYS") else None,
-                    help="only items published in the last N days "
-                         "(default: SCRAPE_DAYS env if set, else no age limit)")
+    # Fixed 5-day scrape window (buffer above the email's tighter age window). Override for
+    # a one-off backfill with --days N.
+    ap.add_argument("--days", type=int, default=5,
+                    help="only items published in the last N days (default 5)")
     ap.add_argument("--login", action="store_true",
                     help="pause for interactive login in the opened browser before scraping "
                          "(for portals whose session does not persist across launches, e.g. barc)")
