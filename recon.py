@@ -20,6 +20,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import config  # noqa: F401  # loads .env
 import sources
@@ -31,11 +32,14 @@ BODY_CAP = 6000  # chars of a JSON body to record (enough to see the item shape)
 
 
 def start_url_from_arg(arg):
-    if not arg:
-        return sources.get("gs").warm_url()
-    if arg in sources.keys():
-        return sources.get(arg).warm_url()
-    return arg  # treat as a raw URL
+    # For a source KEY, open the portal's ORIGIN ROOT - that reliably triggers the login/SSO
+    # redirect for a logged-out session. (A deep authenticated path like JPM's /mcp-home 404s
+    # when you're not logged in, so we can't use the adapter's warm_url here.)
+    key = arg or "gs"
+    if key in sources.keys():
+        p = urlparse(sources.get(key).warm_url())
+        return f"{p.scheme}://{p.netloc}"
+    return arg  # a full URL passed through as-is
 
 
 def main():
