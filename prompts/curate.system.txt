@@ -74,26 +74,32 @@ the one whose abstract names more numbers or levels. Exclude the other.
 Reason: "duplicate"
 Two reports on the same market with different calls are not duplicates. Keep both.
 
-RULE 7. ORDER THE SURVIVORS BY REGION.
-Put each survivor in a region tier below, then sort by date, latest date first, inside the
-tier. This region order is mandatory - it is the order of the email.
+RULE 7. ASSIGN EACH SURVIVOR A REGION TIER.
+Give every survivor a region tier from the list below. The email system orders strictly by
+tier, so a Tier 1 report always precedes any Tier 2, a Tier 2 precedes any Tier 3, and so on.
 
   Tier 1  TURKEY: TRY, CBRT, Turkish inflation, Turkish government bonds, Turkish banks,
           Turkish current account, Turkish sovereign ratings, Turkish issuance, Turkish
           growth, Turkish budget.
-  Tier 2  US / USD: the US economy, Fed or FOMC, US Treasuries, USD, US inflation or CPI,
-          US labour market.
-  Tier 3  EUROPE: EUR, ECB, Bunds and other euro-area government bonds, the UK / GBP / BoE /
-          gilts, and any other European economy or central bank.
-  Tier 4  JAPAN: JPY, BoJ, JGBs, the Japanese economy.
+  Tier 2  US / USD: the US economy, Fed or FOMC, US Treasuries, US inflation or CPI, US
+          labour market, the US dollar.
+  Tier 3  EUROPE: the euro area, ECB, Bunds and other euro-area government bonds, the UK /
+          GBP / BoE / gilts, and any other European economy or central bank.
+  Tier 4  JAPAN: Japan, BoJ, JGBs, JPY, the Japanese economy.
   Tier 5  EVERYTHING ELSE: China and the rest of Asia, other EM, commodities, gold, global
           cross-asset, and anything not in Tiers 1 to 4.
 
-If a survivor matches more than one tier, put it in the LOWEST numbered tier it matches
-(example: EUR/USD goes to Tier 2 US, because US outranks Europe).
-China and non-Japan Asia are always Tier 5; they must NEVER appear ahead of a Turkey, US,
-Europe or Japan report.
-Output order: all of Tier 1, then Tier 2, then Tier 3, then Tier 4, then Tier 5.
+Judge the tier by the report's PRIMARY subject - what it is actually about - NOT by every
+currency it names. Almost every report mentions USD or EUR in passing, so:
+  - Tier 2 (US) ONLY when the US economy, the Fed, or USD is the main subject.
+  - Tier 3 (Europe) ONLY when the euro area, the ECB, a European economy, or the UK is the
+    main subject, EVEN IF the report also mentions USD.
+  - Tier 4 (Japan) ONLY when Japan, the BoJ, or JPY is the main subject.
+If a report genuinely spans two regions as its subject, use the LOWEST numbered tier.
+China and non-Japan Asia are always Tier 5; never ahead of a Turkey, US, Europe or Japan
+report.
+
+Inside "include", order the survivors by date (latest first) within each tier.
 
 ================================================================
 OUTPUT
@@ -102,12 +108,13 @@ OUTPUT
 Return one JSON object and nothing else. First character {. Last character }.
 No markdown fences, no prose before or after.
 
-{"include":[1,3,4],"exclude":[{"n":2,"reason":"equity"}]}
+{"include":[{"n":3,"tier":1},{"n":1,"tier":2},{"n":4,"tier":3}],"exclude":[{"n":2,"reason":"equity"}]}
 
 The numbers in the shape above are illustrative. Never copy them. Use only the candidate
 numbers you were given.
 
-  "include"  candidate numbers in the RULE 7 order, best first.
+  "include"  the reports to mail. Each is an object {"n": candidate number, "tier": its
+             RULE 7 region tier as an integer 1 to 5}, ordered by tier then by date.
   "exclude"  every remaining candidate number, each with one reason.
 
 The reason must be exactly one of these strings, copied character for character:

@@ -28,9 +28,11 @@ SYSTEM_PROMPT = (HERE / "prompts" / "curate.system.txt").read_text(encoding="utf
 
 MAX_INCLUDED = 10   # hard cap: only the top-ranked N reports go in the email
 
-# Mandatory email order: Turkey -> US/USD -> Europe -> Japan -> everything else. The model is
-# asked to rank this way too, but this deterministic sort GUARANTEES it (China / non-Japan Asia
-# can never come first). First matching pattern wins, so lower tiers outrank higher ones.
+# FAIL-OPEN ONLY fallback ordering (Turkey -> US -> Europe -> Japan -> other). The main path
+# uses the tier the MODEL assigns each report, which is accurate; this keyword guess is only
+# used when the LLM is unavailable. It classifies on the title + summary headline (the primary
+# subject) rather than instruments/abstract, where USD/EUR appear on nearly every report - so
+# it is still rough (first matching pattern wins), but Turkey at least always leads.
 _REGIONS = [
     re.compile(r"\bTRY\b|CBRT|Turk|Türk|Turkiye|\blira\b", re.I),                    # Turkey
     re.compile(r"\bUSD\b|\bUST\b|\bFed\b|FOMC|Treasur|\bdollar\b|United States", re.I),   # US
@@ -42,9 +44,7 @@ _REGIONS = [
 
 def _region_rank(r):
     s = r.get("summary") or {}
-    text = " ".join([r.get("title") or "", r.get("headline") or "",
-                     " ".join(str(x) for x in (s.get("instruments") or [])),
-                     s.get("one_paragraph") or ""])
+    text = " ".join([r.get("title") or "", s.get("headline") or r.get("headline") or ""])
     for i, pat in enumerate(_REGIONS):
         if pat.search(text):
             return i
@@ -52,7 +52,7 @@ def _region_rank(r):
 
 
 def _region_sort(reports):
-    """Stable sort into the mandatory region order (ties keep the model's within-region rank)."""
+    """Fail-open fallback: rough stable sort into the region order when the model is unavailable."""
     return sorted(reports, key=_region_rank)
 
 
@@ -97,25 +97,41 @@ def build_user(reports):
 
 
 def _parse_order(obj, n):
-    """Ordered list of 1-based indices to include, in the model's priority order, or None if
-    unusable. Accepts "include" (kept in order); else derives from "exclude" (rest, original
-    order). Out-of-range/duplicate indices dropped."""
-    def _ints(seq):
-        out = []
-        for x in seq or []:
+    """Ordered list of 1-based indices to include, sorted into the mandatory region order using
+    the TIER the model assigned each report. The model judges the primary region (it reads the
+    abstract) - not a keyword match on instruments, where USD/EUR appear on nearly every report.
+    Ties keep the model's within-tier order. Falls back to exclude-derive (original order) when
+    there is no include list. Out-of-range / duplicate indices dropped."""
+    inc = obj.get("include")
+    if isinstance(inc, list):
+        items, seen = [], set()
+        for pos, x in enumerate(inc):
+            num = x.get("n") if isinstance(x, dict) else x
+            tier = x.get("tier") if isinstance(x, dict) else None
+            try:
+                num = int(num)
+            except (TypeError, ValueError):
+                continue
+            if not (1 <= num <= n) or num in seen:
+                continue
+            seen.add(num)
+            try:
+                tier = int(tier)
+            except (TypeError, ValueError):
+                tier = 99   # untiered -> after everything tiered
+            items.append((tier, pos, num))
+        items.sort(key=lambda t: (t[0], t[1]))   # stable: region tier, then the model's order
+        return [num for _, _, num in items]
+    if isinstance(obj.get("exclude"), list):
+        excluded = set()
+        for x in obj["exclude"]:
             v = x.get("n") if isinstance(x, dict) else x
             try:
                 v = int(v)
             except (TypeError, ValueError):
                 continue
-            if 1 <= v <= n and v not in out:
-                out.append(v)
-        return out
-
-    if isinstance(obj.get("include"), list):
-        return _ints(obj["include"])
-    if isinstance(obj.get("exclude"), list):
-        excluded = set(_ints(obj["exclude"]))
+            if 1 <= v <= n:
+                excluded.add(v)
         return [i for i in range(1, n + 1) if i not in excluded]
     return None
 
@@ -152,12 +168,13 @@ def select(reports, verbose=True, today=None):
             print(f"[curate] LLM unavailable ({exc}); mailing newest {MAX_INCLUDED} survivor(s).")
         return _region_sort(survivors)[:MAX_INCLUDED]
 
-    ranked = [survivors[i - 1] for i in order]        # topic-relevant, model's ranking
-    selected = _region_sort(ranked)[:MAX_INCLUDED]    # enforce region order, then cap
+    # order is already sorted into region tiers by the model's tier tags (see _parse_order).
+    ranked = [survivors[i - 1] for i in order]
+    selected = ranked[:MAX_INCLUDED]
     if verbose:
         for rank, r in enumerate(selected, 1):
             title = (r.get("title") or r.get("headline") or "(untitled)")[:60]
             print(f"[curate] mail #{rank}  {title}")
         print(f"[curate] {n} in window -> AI kept {len(ranked)} relevant "
-              f"-> region-ordered, mailing top {len(selected)} (cap {MAX_INCLUDED}).")
+              f"-> region-ordered by tier, mailing top {len(selected)} (cap {MAX_INCLUDED}).")
     return selected
