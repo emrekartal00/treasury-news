@@ -14,6 +14,7 @@ import oracledb
 
 import ai
 import db_conn
+import window
 
 HERE = Path(__file__).parent
 SYSTEM_PROMPT = (HERE / "prompts" / "summary.system.txt").read_text(encoding="utf-8")
@@ -59,14 +60,17 @@ def validate(obj):
 
 
 def pending(cur, limit):
+    # Only summarize reports inside the active publication window (see window.py). A fresh run
+    # scrapes a 5-day buffer, but we only spend the LLM on what could go in today's email.
     cur.execute("""
         SELECT r.report_id, r.title, r.distribution_headline, rt.plain_text
         FROM reports r
         JOIN report_text rt ON rt.report_id = r.report_id
         LEFT JOIN report_summary s ON s.report_id = r.report_id
         WHERE s.report_id IS NULL AND rt.plain_text IS NOT NULL
+          AND r.publication_date >= TO_DATE(:cutoff, 'YYYY-MM-DD')
         ORDER BY r.publication_ts DESC
-    """)
+    """, {"cutoff": window.min_pub_date()})
     rows = cur.fetchall()
     return rows[:limit] if limit else rows
 

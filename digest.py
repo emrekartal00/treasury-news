@@ -11,6 +11,7 @@ import json
 import oracledb
 
 import db_conn
+import window
 
 
 def db_today(cur):
@@ -20,13 +21,16 @@ def db_today(cur):
 
 def build(con, date_str):
     cur = con.cursor()
+    # Membership = reports published inside the active window (window.py) with an OK summary,
+    # so the digest matches the email regardless of when each report was scraped.
     cur.execute("""
         SELECT r.report_id, r.title, s.summary_json, r.source
         FROM reports r
         JOIN report_summary s ON s.report_id = r.report_id
-        WHERE TRUNC(r.scraped_at) = TO_DATE(:d, 'YYYY-MM-DD') AND s.status = 'OK'
+        WHERE s.status = 'OK'
+          AND r.publication_date >= TO_DATE(:cutoff, 'YYYY-MM-DD')
         ORDER BY r.publication_ts DESC NULLS LAST
-    """, {"d": date_str})
+    """, {"cutoff": window.min_pub_date()})
     rows = cur.fetchall()
     if not rows:
         print(f"No summarized reports fetched on {date_str}; nothing to digest.")

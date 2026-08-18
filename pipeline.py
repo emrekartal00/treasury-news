@@ -23,6 +23,7 @@ import subprocess
 import sys
 
 import db_conn
+import window
 
 STAGES = [
     ("scrape", "daily.py"),
@@ -36,8 +37,9 @@ MAX_SUMMARIZE_PASSES = int(os.environ.get("SUMMARIZE_PASSES", "5"))
 
 
 def pending_summaries():
-    """How many reports still need a summary (have text, no summary row yet).
-    Matches summarize.pending()'s WHERE clause."""
+    """How many in-window reports still need a summary (have text, no summary row yet).
+    Must match summarize.pending()'s WHERE clause, including the window, or the retry loop
+    would keep counting out-of-window backlog forever."""
     con = db_conn.connect()
     try:
         cur = con.cursor()
@@ -46,7 +48,8 @@ def pending_summaries():
             JOIN report_text rt ON rt.report_id = r.report_id
             LEFT JOIN report_summary s ON s.report_id = r.report_id
             WHERE s.report_id IS NULL AND rt.plain_text IS NOT NULL
-        """)
+              AND r.publication_date >= TO_DATE(:cutoff, 'YYYY-MM-DD')
+        """, {"cutoff": window.min_pub_date()})
         return cur.fetchone()[0]
     finally:
         con.close()

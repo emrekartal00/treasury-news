@@ -18,10 +18,10 @@ Disable entirely with CURATE_EMAIL=0. ai.py is not touched by this module.
 """
 import os
 import re
-from datetime import date, timedelta
 from pathlib import Path
 
 import ai
+import window
 
 HERE = Path(__file__).parent
 SYSTEM_PROMPT = (HERE / "prompts" / "curate.system.txt").read_text(encoding="utf-8")
@@ -63,11 +63,8 @@ def enabled():
 
 
 def min_date(today=None):
-    """Oldest acceptable publication date (YYYY-MM-DD). Tue-Fri: 1 day; Monday: 3 days
-    (covers the unmailed Friday/Saturday/Sunday)."""
-    today = today or date.today()
-    back = 3 if today.weekday() == 0 else 1   # Monday == 0
-    return (today - timedelta(days=back)).isoformat()
+    """Oldest acceptable publication date (YYYY-MM-DD) - the shared pipeline window."""
+    return window.min_pub_date(today)
 
 
 def _within_window(reports, cutoff):
@@ -144,7 +141,7 @@ def select(reports, verbose=True, today=None):
     n = len(survivors)
     try:
         content, finish = ai.chat(SYSTEM_PROMPT, build_user(survivors),
-                                  temperature=0.1, max_tokens=2048)
+                                  temperature=0.1, max_tokens=4096)
         if finish == "length":
             raise ai.LLMError("truncated curation output (finish_reason=length)")
         order = _parse_order(ai.parse_json(content), n)
