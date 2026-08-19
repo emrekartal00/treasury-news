@@ -4,6 +4,7 @@
 <article class="report">
   <h1>{{ r.title or r.headline or '(untitled)' }}</h1>
   <p class="meta">
+    {%- if r.source %}<span class="src">{{ r.source|source_name }}</span> {% endif %}
     {%- if r.date %}{{ r.date }}{% endif %}
     {%- if r.authors %} &middot; {{ r.authors|join(', ') }}{% endif %}
     {%- if r.pages %} &middot; {{ r.pages }} pages{% endif -%}

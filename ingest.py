@@ -19,8 +19,34 @@ import db_conn
 HERE = Path(__file__).parent
 DOWNLOADS = HERE / "downloads"
 
+# Below this many chars, the HTML is treated as a JS shell (e.g. JPM's /research/content
+# returns an app shell, not the article) and we fall back to the PDF for the body text.
+MIN_HTML_TEXT_CHARS = 400
+
 
 # ---------------------------------------------------------------- text extraction
+def extract_pdf_text(pdf_bytes):
+    """Extract plain text from a PDF - the body-text fallback when the HTML is a JS shell.
+    Best-effort: returns '' if pypdf is missing or the PDF can't be parsed."""
+    try:
+        import io
+
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        parts = []
+        for pg in reader.pages:
+            try:
+                parts.append(pg.extract_text() or "")
+            except Exception:
+                continue
+        text = "\n".join(parts)
+    except Exception as exc:
+        print(f"    (pdf text extraction failed: {exc})")
+        return ""
+    lines = [ln.strip() for ln in text.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
 def extract_text(html):
     """HTML -> clean plain text. Tries selectolax, then bs4, then a crude regex fallback."""
     text = None
@@ -74,6 +100,16 @@ def store(con, meta, html, pdf_bytes):
     rid = meta["id"]
     pub_ts, pub_date = ms_to_dt(meta.get("publicationDateTime"))
     plain = extract_text(html) if html else ""
+    # If the HTML gave us almost nothing (JS shell), use the PDF as the body-text source.
+    if len(plain) < MIN_HTML_TEXT_CHARS and pdf_bytes:
+        pdf_text = extract_pdf_text(pdf_bytes)
+        if len(pdf_text) > len(plain):
+            plain = pdf_text
+    # Nothing usable (e.g. a text-less MS video/calendar card) - skip so it never reaches
+    # the summarizer as an empty report.
+    if not plain and not pdf_bytes:
+        cur.close()
+        return None
     search_key = build_search_key(meta)
     authors_b = json.dumps(meta.get("authors") or [], ensure_ascii=False).encode("utf-8")
     rtypes_b = json.dumps(meta.get("reportTypes") or [], ensure_ascii=False).encode("utf-8")
@@ -87,17 +123,18 @@ def store(con, meta, html, pdf_bytes):
         MERGE INTO reports t USING (SELECT :id AS report_id FROM dual) s
         ON (t.report_id = s.report_id)
         WHEN MATCHED THEN UPDATE SET
-            title=:title, distribution_headline=:headline, publication_ts=:pub_ts,
-            publication_date=:pub_date, authors=:authors, report_types=:rtypes,
-            source_path=:src, download_path=:dl, total_pages=:pages, synopsis=:syn,
-            scraped_at=SYSTIMESTAMP, status='STORED'
+            source=:source, title=:title, distribution_headline=:headline,
+            publication_ts=:pub_ts, publication_date=:pub_date, authors=:authors,
+            report_types=:rtypes, source_path=:src, download_path=:dl, total_pages=:pages,
+            synopsis=:syn, scraped_at=SYSTIMESTAMP, status='STORED'
         WHEN NOT MATCHED THEN INSERT
-            (report_id, title, distribution_headline, publication_ts, publication_date,
+            (report_id, source, title, distribution_headline, publication_ts, publication_date,
              authors, report_types, source_path, download_path, total_pages, synopsis,
              scraped_at, status)
-        VALUES (:id, :title, :headline, :pub_ts, :pub_date, :authors, :rtypes, :src, :dl,
-                :pages, :syn, SYSTIMESTAMP, 'STORED')
-    """, {"id": rid, "title": meta.get("title"), "headline": meta.get("distributionHeadline"),
+        VALUES (:id, :source, :title, :headline, :pub_ts, :pub_date, :authors, :rtypes,
+                :src, :dl, :pages, :syn, SYSTIMESTAMP, 'STORED')
+    """, {"id": rid, "source": meta.get("source") or "gs",
+          "title": meta.get("title"), "headline": meta.get("distributionHeadline"),
           "pub_ts": pub_ts, "pub_date": pub_date, "authors": authors_b, "rtypes": rtypes_b,
           "src": meta.get("htmlUrl"), "dl": meta.get("pdfUrl"),
           "pages": meta.get("totalPages"), "syn": meta.get("synopsis")})
@@ -130,7 +167,8 @@ def store(con, meta, html, pdf_bytes):
 
 
 def main():
-    metas = sorted(glob.glob(str(DOWNLOADS / "*" / "*.meta.json")))
+    # Recursive: handles both downloads/<date>/ (legacy) and downloads/<key>/<date>/.
+    metas = sorted(glob.glob(str(DOWNLOADS / "**" / "*.meta.json"), recursive=True))
     if not metas:
         print("No downloaded items under downloads/. Run daily.py first.")
         return
@@ -150,7 +188,12 @@ def main():
             html = Path(base + ".html").read_text(encoding="utf-8") if os.path.exists(base + ".html") else ""
             pdf_path = base + ".pdf"
             pdf_bytes = Path(pdf_path).read_bytes() if os.path.exists(pdf_path) else None
-            tlen, plen = store(con, meta, html, pdf_bytes)
+            result = store(con, meta, html, pdf_bytes)
+            if result is None:
+                skipped += 1
+                print(f"  skipped {rid[:8]}  (no text/pdf)  {meta.get('title')}")
+                continue
+            tlen, plen = result
             stored += 1
             print(f"  stored {rid[:8]}  text={tlen}c pdf={plen}b  {meta.get('title')}")
         except Exception as exc:

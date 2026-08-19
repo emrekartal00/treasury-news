@@ -7,12 +7,16 @@ and never talks to the AI or SMTP. Uses `python-oracledb` thin mode (no Oracle c
 ## Routes
 | Path | Purpose |
 |------|---------|
-| `GET /` | Latest digest + recent reports (paginated) |
-| `GET /search?q=` | `LIKE` search over titles/authors/synopsis |
-| `GET /reports/<id>` | Metadata + AI summary + embedded PDF |
+| `GET /` | Latest digest + recent reports (paginated), each tagged with its source |
+| `GET /search?q=` | `LIKE` search over titles/authors/synopsis (results show the source) |
+| `GET /reports/<id>` | Metadata (incl. source) + AI summary + embedded PDF |
 | `GET /reports/<id>/pdf` | PDF bytes from the BLOB (`?download=1` to attach) |
 | `GET /digest/<YYYY-MM-DD>` | A given day's digest |
 | `GET /healthz` `GET /readyz` | Liveness / readiness (DB ping) |
+
+`<id>` may be a bare id (the original source) or a namespaced `source:id` (e.g. `jpm:...`);
+the route accepts both. The archive reads the `reports.source` column (part of the
+`001_init.sql` schema).
 
 ## Environment
 | Var | Meaning |

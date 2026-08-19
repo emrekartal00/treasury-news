@@ -10,7 +10,24 @@ from flask import Flask, Response, abort, render_template, request
 import db
 
 app = Flask(__name__)
-_UUID = re.compile(r"^[0-9a-fA-F-]{36}$")
+# Accept a bare GS UUID, or a namespaced multi-source id like "jpm:1a2b..." / "citi:ABC-1".
+_RID = re.compile(r"^(?:[0-9a-fA-F-]{36}|[a-z0-9]{1,20}:[A-Za-z0-9._:-]{1,120})$")
+
+# Source key -> display name (used by the `source_name` template filter).
+SOURCE_NAMES = {
+    "gs": "Goldman Sachs",
+    "jpm": "J.P. Morgan",
+    "citi": "Citi",
+    "barc": "Barclays",
+    "ms": "Morgan Stanley",
+    "db": "Deutsche Bank",
+}
+
+
+@app.template_filter("source_name")
+def source_name(key):
+    key = (key or "").lower()
+    return SOURCE_NAMES.get(key, key.upper())
 
 
 @app.route("/")
@@ -21,10 +38,9 @@ def index():
         page = 1
     per = 25
     rows = db.recent(per, (page - 1) * per)
-    date = db.latest_digest_date()
-    digest = db.get_digest(date) if date else None
-    return render_template("index.html", rows=rows, page=page, has_next=len(rows) == per,
-                           digest=digest, digest_date=date)
+    today = db.todays_by_source() if page == 1 else {}  # today's block only on the first page
+    return render_template("index.html", rows=rows, page=page,
+                           has_next=len(rows) == per, today=today)
 
 
 @app.route("/search")
@@ -36,7 +52,7 @@ def search():
 
 @app.route("/reports/<rid>")
 def report(rid):
-    if not _UUID.match(rid):
+    if not _RID.match(rid):
         abort(404)
     r = db.get_report(rid)
     if not r:
@@ -46,7 +62,7 @@ def report(rid):
 
 @app.route("/reports/<rid>/pdf")
 def report_pdf(rid):
-    if not _UUID.match(rid):
+    if not _RID.match(rid):
         abort(404)
     data = db.get_pdf(rid)
     if not data:
