@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 from sources.base import Source
 
 _ORIGIN = os.environ.get("JPM_ORIGIN") or "https://REDACTED.example.com"
-_MYCONTENT = os.environ.get("JPM_MYCONTENT") or f"{_ORIGIN}/mcp-home"
+# Warm at the origin root (or JPM_HOME): it loads the authenticated app when logged in and
+# redirects to login when not. /mcp-home is a deep path that 404s for a logged-out session.
+_HOME = os.environ.get("JPM_HOME") or os.environ.get("JPM_MYCONTENT") or _ORIGIN
 _FEED_BASE = os.environ.get("JPM_FEED_BASE") or f"{_ORIGIN}/mcp-home/api/data-service/feed-content"
 
 
@@ -23,7 +25,7 @@ class JPMorgan(Source):
     id_prefix = "jpm"
 
     def warm_url(self):
-        return _MYCONTENT
+        return _HOME
 
     def feed_url(self, offset, limit):
         # The feed returns the latest research in one payload; no offset/limit params.
