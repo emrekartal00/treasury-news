@@ -1,9 +1,14 @@
 """sources/ms.py - Morgan Stanley Matrix research adapter (source key: ms).
 
-Matrix is a heavy Angular portal (the /eqr/ app). There is no flat "latest research"
-API for an unentitled feed, so the report list is aggregated from the curated GLOBAL homepage
-sections (content/Home + content/auto/Home); each card carries the uuid, headline, ISO date,
-authors, and abstract. Everything is addressable by the report uuid:
+Matrix is a heavy Angular portal (the /eqr/ app). PRIMARY enumeration is the portal's own
+match-all research SEARCH feed (portal-content-service/search) sorted by date - the MS
+equivalent of a "latest research" stream, covering the full entitled catalogue (hundreds of
+reports/day across all regions/sectors), not just the curated homepage. The homepage
+aggregation (content/Home + content/auto/Home) is kept only as a fallback if search fails.
+
+Both the search cards and the homepage cards carry the same fields (id/hl/pd/ab/a/co), so a
+single normalize()/content_url()/pdf_url() handles either. Everything is addressable by the
+report uuid:
   - body text: /eqr/article/webapp/services/published/article/sections?uuid=<uuid> returns the
     article as HTML inside JSON (same-origin fetch), stitched for ingest.py to summarize.
   - PDF: frontmatter?uuid=<uuid> exposes a same-origin `pdfRenditionUrl` (carries the
@@ -19,6 +24,10 @@ from sources.base import Source
 
 # Homepage cards mix in media/non-article content that has no text sections - skip those.
 _SKIP_TITLE = re.compile(r"^\s*(video|audio|podcast|replay)\b", re.I)
+# The match-all search feed also surfaces Excel financial MODELS ('Regular Update' cards:
+# pcat1='Model', dt='application/xls'). They have no article body and no PDF (frontmatter
+# 500s), so they'd only waste the daily budget - identify and skip them by format.
+_MODEL_FORMATS = {"xls", "xlsx", "xlsm", "csv"}
 
 _ORIGIN = os.environ.get("MS_ORIGIN") or "https://REDACTED.example.com"
 _CONTENT = "/eqr/research/webapp/portalservices/portal-content-service"
@@ -36,15 +45,70 @@ class MorganStanley(Source):
     def warm_url(self):
         return f"{_ORIGIN}/eqr/research/portal/home"
 
+    # ------------------------------------------------------------- search feed (primary)
+    def _search_url(self):
+        return f"{_ORIGIN}{_CONTENT}/search"
+
+    def _search_body(self, page_no, size):
+        # Discovered from the portal's own request: '(text==*)' is match-all, sort 'd' = date
+        # desc. invokeAskResearch is disabled (we don't want the AI side-effect); userJourneyId
+        # is a fixed nil-uuid (the server does not validate it for the results payload).
+        return {
+            "compositeRequest": {
+                "search": "(text==*)", "sort": "d", "noSearch": False, "gn": False,
+                "didyoumean": False, "countMode": "best", "showcard": True,
+                "size": size, "page": page_no,
+            },
+            "arRequest": {
+                "skipSpellCheck": True,
+                "userJourneyId": "00000000-0000-0000-0000-000000000000",
+                "invokeAskResearch": False, "dateFilter": "",
+                "filtersMap": {"queryWithoutStopwords": ""},
+            },
+        }
+
+    def fetch_items(self, page, offset, limit):
+        # daily.py paginates by stepping `offset` by `limit`; map that to the search feed's
+        # 1-based `page` with `size == limit` so the windows line up exactly.
+        size = limit or 30
+        page_no = (offset // size) + 1
+        res = page.evaluate(
+            """async ({u, b}) => {
+                const r = await fetch(u, { method: 'POST', credentials: 'include',
+                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+                return { ok: r.ok, status: r.status, body: await r.text() };
+            }""", {"u": self._search_url(), "b": self._search_body(page_no, size)})
+        body = res.get("body") or ""
+        if body.lstrip()[:1] == "<":
+            raise RuntimeError("feed returned HTML (session expired / not logged in)")
+        if not res.get("ok"):
+            # Fall back to the curated homepage on the first page only (keeps us running if
+            # the search service is briefly unavailable); deeper pages just stop.
+            if page_no == 1:
+                return self._homepage_items(page)
+            raise RuntimeError(f"search {res.get('status')} at page {page_no}")
+        data = json.loads(body) if body else {}
+        cards = (((data or {}).get("rcsResponse") or {}).get("reportcards")) or []
+        return [c for c in cards if self._is_article(c)]
+
+    @staticmethod
+    def _is_article(card):
+        """Keep only real articles: has an id, not a media title, not a spreadsheet model."""
+        if not card.get("id") or _SKIP_TITLE.match(card.get("hl") or ""):
+            return False
+        af = (card.get("af") or "").lower()
+        dt = (card.get("dt") or "").lower()
+        if af in _MODEL_FORMATS or "xls" in dt or "excel" in dt or "spreadsheet" in dt:
+            return False
+        return True
+
+    # ------------------------------------------------------- curated homepage (fallback)
     def _feed_urls(self):
         base = f"{_ORIGIN}{_CONTENT}"
         return [
             f"{base}/content/Home?entityType=REGION&entityId={_REGION}&language=EN",
             f"{base}/content/auto/Home?entityType=REGION&entityId={_REGION}&language=EN&reportLanguages=EN",
         ]
-
-    def feed_url(self, offset, limit):
-        return self._feed_urls()[0]
 
     def _get_json(self, page, url):
         res = page.evaluate(
@@ -59,11 +123,10 @@ class MorganStanley(Source):
             raise RuntimeError(f"feed {res.get('status')}")
         return json.loads(body) if body else None
 
-    def fetch_items(self, page, offset, limit):
-        if offset:  # curated homepage; no offset pagination
-            return []
+    def _homepage_items(self, page):
         by_id = {}
         errors = 0
+        last = None
         for url in self._feed_urls():
             try:
                 data = self._get_json(page, url)
