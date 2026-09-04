@@ -61,15 +61,24 @@ def chat(system, user, temperature=0.2, max_tokens=2048, timeout=120):
 
 
 def parse_json(content):
-    """Strip ```json fences and extract the first {...} object; raise on failure."""
-    m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", content, re.S)
-    text = m.group(1) if m else None
-    if text is None:
-        start, end = content.find("{"), content.rfind("}")
-        if start == -1 or end == -1 or end < start:
-            raise LLMError("no JSON object found in model output")
-        text = content[start:end + 1]
-    return json.loads(text)
+    """Extract the FIRST complete JSON value (object OR array) from the model output.
+
+    Tolerates ```json fences, prose around the value, and any trailing text or a second
+    value after it (raw_decode stops at the end of the first value, so a stray extra block
+    no longer raises 'Extra data'). Returns whichever of '{' or '[' appears first, so a model
+    that emits a bare array instead of the wrapping object is still parsed. Raises LLMError
+    when no parseable JSON value is present."""
+    m = re.search(r"```(?:json)?\s*([\[{].*)```", content, re.S)
+    src = m.group(1) if m else content
+    starts = [i for i in (src.find("{"), src.find("[")) if i != -1]
+    if not starts:
+        raise LLMError("no JSON value found in model output")
+    start = min(starts)
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(src, start)
+    except ValueError as exc:
+        raise LLMError(f"could not parse JSON value: {exc}") from exc
+    return obj
 
 
 class FakeLLM:

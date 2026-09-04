@@ -105,24 +105,20 @@ Inside "include", order the survivors by date (latest first) within each tier.
 OUTPUT
 ================================================================
 
-Return one JSON object and nothing else. First character {. Last character }.
-No markdown fences, no prose before or after.
+Return one JSON object and nothing else. The FIRST character of your reply must be { and the
+LAST character must be }. No markdown fences, no prose before or after.
 
-{"include":[{"n":3,"tier":1},{"n":1,"tier":2},{"n":4,"tier":3}],"exclude":[{"n":2,"reason":"equity"}]}
+{"include":[{"n":3,"tier":1},{"n":1,"tier":2},{"n":4,"tier":3}]}
 
 The numbers in the shape above are illustrative. Never copy them. Use only the candidate
 numbers you were given.
 
-  "include"  the reports to mail. Each is an object {"n": candidate number, "tier": its
-             RULE 7 region tier as an integer 1 to 5}, ordered by tier then by date.
-  "exclude"  every remaining candidate number, each with one reason.
+The object has exactly one key, "include": an array of the reports to mail, and ONLY those -
+every candidate that survives RULE 1 to RULE 6. Each array element is an object
+{"n": candidate number, "tier": its RULE 7 region tier as an integer 1 to 5}, ordered by tier
+then by date (latest first).
 
-The reason must be exactly one of these strings, copied character for character:
-  "no content"
-  "not research"
-  "equity"
-  "not treasury relevant"
-  "duplicate"
-
-Every candidate number you were given appears exactly once, in either include or exclude.
-Never invent a candidate number.
+Do NOT return a bare array - always wrap it in {"include": ...}. Do NOT output an "exclude"
+list and do NOT output reasons; simply leave every dropped candidate out of "include". This
+keeps the response short even when there are hundreds of candidates. Never invent a candidate
+number and never list one twice.

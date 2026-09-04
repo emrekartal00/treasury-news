@@ -101,7 +101,12 @@ def _parse_order(obj, n):
     the TIER the model assigned each report. The model judges the primary region (it reads the
     abstract) - not a keyword match on instruments, where USD/EUR appear on nearly every report.
     Ties keep the model's within-tier order. Falls back to exclude-derive (original order) when
-    there is no include list. Out-of-range / duplicate indices dropped."""
+    there is no include list. Out-of-range / duplicate indices dropped.
+
+    Accepts either the documented object ({"include":[...]}) or a bare array - some models emit
+    just the include list itself - by treating a top-level list as the include list."""
+    if isinstance(obj, list):
+        obj = {"include": obj}
     inc = obj.get("include")
     if isinstance(inc, list):
         items, seen = [], set()
@@ -156,8 +161,10 @@ def select(reports, verbose=True, today=None):
 
     n = len(survivors)
     try:
+        # include-only output (see prompts/curate.system.txt) keeps this small even for
+        # hundreds of candidates; the headroom is insurance against a large include list.
         content, finish = ai.chat(SYSTEM_PROMPT, build_user(survivors),
-                                  temperature=0.1, max_tokens=4096)
+                                  temperature=0.1, max_tokens=8192)
         if finish == "length":
             raise ai.LLMError("truncated curation output (finish_reason=length)")
         order = _parse_order(ai.parse_json(content), n)
