@@ -5,6 +5,14 @@ with links to the web app), sends it through the LOCAL OUTLOOK desktop app via C
 (pywin32) - no SMTP, sends as the logged-in Outlook/Exchange account - and records the
 result in EMAIL_LOG. Never double-sends a day (unless --force).
 
+EMAIL_LOG.report_ids (migration 003) keeps the ids that actually went out, IN EMAIL
+ORDER, so the PRISMA library can show "the latest email" on top of its list. The
+column is optional: before 003 is run the log row is written without it.
+
+Title rule (shared with the PRISMA library): a card's title is the report's own
+title (REPORTS.TITLE); the summary headline sits under it as a grey line, unless it
+is empty, NO_CONTENT or the same text as the title.
+
 Run:  python mailer.py [--date YYYY-MM-DD] [--force] [--preview]
   --preview opens the mail in Outlook for review instead of sending.
 """
@@ -59,6 +67,46 @@ def load_report(cur, rid):
         "date": pub_date,
         "summary": db_conn.as_json(sj) or {},
     }
+
+
+def summary_line(title, summary):
+    """The grey second line under the title: the summary headline, unless it is
+    empty, NO_CONTENT or the title itself. Same rule as the PRISMA library
+    (customs/arastirma/data_source.py::alt_satir)."""
+    line = ((summary or {}).get("headline") or "").strip()
+    if line in ("", "NO_CONTENT"):
+        return None
+    if line.casefold() == (title or "").strip().casefold():
+        return None
+    return line
+
+
+def has_report_ids_column(cur):
+    """True once migration 003 has added EMAIL_LOG.report_ids."""
+    try:
+        cur.execute("SELECT report_ids FROM email_log WHERE 1 = 0")
+        cur.fetchall()
+        return True
+    except oracledb.DatabaseError:
+        return False
+
+
+def log_email(cur, row, report_ids):
+    """Insert one EMAIL_LOG row; report_ids (email order) only when the column exists,
+    so a missing migration never breaks the log that prevents double sends."""
+    cols = ["id", "digest_date", "subject", "recipients", "status", "message_id", "error", "sent_at"]
+    vals = [":id", "TO_DATE(:d,'YYYY-MM-DD')", ":subj", ":rcpt", ":status", ":mid", ":err",
+            "SYSTIMESTAMP"]
+    sizes = dict(rcpt=oracledb.DB_TYPE_NCLOB, subj=oracledb.DB_TYPE_NVARCHAR,
+                 err=oracledb.DB_TYPE_NCLOB)
+    params = dict(row)
+    if has_report_ids_column(cur):
+        cols.append("report_ids")
+        vals.append(":rids")
+        sizes["rids"] = oracledb.DB_TYPE_BLOB
+        params["rids"] = json.dumps(report_ids, ensure_ascii=False).encode("utf-8")
+    cur.setinputsizes(**sizes)
+    cur.execute(f"INSERT INTO email_log ({', '.join(cols)}) VALUES ({', '.join(vals)})", params)
 
 
 def esc(s):
@@ -119,12 +167,17 @@ def _card(r, base_url):
     s = r.get("summary") or {}
     rid = r["id"]
     read = f"{base_url}/reports/{rid}" if base_url else (r.get("source_path") or "#")
-    title = esc(r.get("title") or r.get("headline") or "(untitled)")
+    raw_title = r.get("title") or r.get("headline") or "(untitled)"
+    title = esc(raw_title)
+    line = summary_line(raw_title, s)
     authors = esc(", ".join(r["authors"])) if r.get("authors") else ""
     src_label = esc((r.get("source") or "").upper())
 
     inner = [f'<a href="{esc(read)}" style="font-family:{_SANS};font-size:18px;line-height:1.35;'
              f'font-weight:bold;color:{_INK};text-decoration:none;">{title}</a>']
+    if line:
+        inner.append(f'<div style="font-family:{_SANS};font-size:14px;line-height:1.45;'
+                     f'color:{_MUTED};margin-top:4px;">{esc(line)}</div>')
     if authors or src_label:
         src_html = (f'<span style="font-family:{_SANS};font-size:11px;font-weight:bold;'
                     f'letter-spacing:.05em;color:{_ACCENT};">{src_label}</span>'
@@ -209,7 +262,11 @@ def render(overview, reports, base_url):
     text = [f"Daily Research Digest - {overview.get('date','')} - {n} report(s)", ""]
     for r in reports:
         s = r.get("summary") or {}
-        text.append("* " + (r.get("title") or r.get("headline") or "(untitled)"))
+        title = r.get("title") or r.get("headline") or "(untitled)"
+        text.append("* " + title)
+        line = summary_line(title, s)
+        if line:
+            text.append("  " + line)
         if s.get("one_paragraph"):
             text.append("  " + s["one_paragraph"])
         link = f"{base_url}/reports/{r['id']}" if base_url else (r.get("source_path") or "")
@@ -286,6 +343,7 @@ def main():
         con.close()
         return
     overview["counts"] = count_stances(reports)
+    sent_ids = [r["id"] for r in reports]     # email order = curated order
 
     base = os.environ.get("WEBAPP_BASE_URL", "").rstrip("/")
     subject = f"Daily Research Digest - {date_str} - {len(reports)} report(s)"
@@ -299,22 +357,15 @@ def main():
             print(f"Opened digest for {date_str} in Outlook for review (not sent).")
             con.close()
             return
-        cur.setinputsizes(rcpt=oracledb.DB_TYPE_NCLOB, subj=oracledb.DB_TYPE_NVARCHAR)
-        cur.execute("""
-            INSERT INTO email_log (id, digest_date, subject, recipients, status, message_id, sent_at)
-            VALUES (:id, TO_DATE(:d,'YYYY-MM-DD'), :subj, :rcpt, 'SENT', :mid, SYSTIMESTAMP)
-        """, {"id": log_id, "d": date_str, "subj": subject[:500], "rcpt": recipients,
-              "mid": (result or "")[:300]})
+        log_email(cur, {"id": log_id, "d": date_str, "subj": subject[:500], "rcpt": recipients,
+                        "status": "SENT", "mid": (result or "")[:300], "err": None},
+                  sent_ids)
         con.commit()
         print(f"Sent digest for {date_str} to {recipients} ({len(reports)} reports).")
     except Exception as exc:
-        cur.setinputsizes(err=oracledb.DB_TYPE_NCLOB, rcpt=oracledb.DB_TYPE_NCLOB,
-                          subj=oracledb.DB_TYPE_NVARCHAR)
-        cur.execute("""
-            INSERT INTO email_log (id, digest_date, subject, recipients, status, error, sent_at)
-            VALUES (:id, TO_DATE(:d,'YYYY-MM-DD'), :subj, :rcpt, 'FAILED', :err, SYSTIMESTAMP)
-        """, {"id": log_id, "d": date_str, "subj": subject[:500], "rcpt": recipients,
-              "err": str(exc)[:2000]})
+        log_email(cur, {"id": log_id, "d": date_str, "subj": subject[:500], "rcpt": recipients,
+                        "status": "FAILED", "mid": None, "err": str(exc)[:2000]},
+                  sent_ids)
         con.commit()
         print(f"[FAIL] send: {exc}")
         con.close()
