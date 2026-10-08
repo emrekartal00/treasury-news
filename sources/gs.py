@@ -26,6 +26,11 @@ class GoldmanSachs(Source):
     key = "gs"
     label = "Goldman Sachs"
     id_prefix = None  # bare UUID
+    # The GS app adds an Authorization header to its own feed-API calls; a bare fetch gets
+    # 401. Capture it from the page's own feed call (GS origin, feed API path derived from
+    # GS_FEED_BASE) and send it with ours; PDFs get it as a 401/403 retry (Source.auth_capture).
+    # Off with GS_AUTH_REPLAY=off.
+    auth_capture = True
 
     def warm_url(self):
         return _MYCONTENT
