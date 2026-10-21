@@ -13,18 +13,45 @@ Title rule (shared with the PRISMA library): a card's title is the report's own
 title (REPORTS.TITLE); the summary headline sits under it as a grey line, unless it
 is empty, NO_CONTENT or the same text as the title.
 
+Executive summary (owner decision D17, 2026-10-20): on top of the cards, ONE Turkish
+summary across the day's research, built by exec_summary.py (port of treasury-report's
+research_summary): the first 30 reports are scanned - the mail's own reports in mail order,
+then the rest of the day's digest - every sentence cites its report(s) [R#] (linked to the
+same pages as the cards, and each card shows its own [R#]), numbers are slots the code fills
+from the reports, the code's template is used when the model's text fails the checks. It
+never stops the mail: an error or the time limit (EXEC_SUMMARY_TIMEOUT) sends the cards
+without it. Switches below (hand-edited, default OFF):
+  EXEC_SUMMARY = True          the summary goes into the real mail;
+  EXEC_SUMMARY_DRY_RUN = True  the mail WITH the summary is written to
+                               state/exec_summary_dry_run.html; nothing is sent, nothing is
+                               logged, and an already-sent day can be dry-run again.
+
 Run:  python mailer.py [--date YYYY-MM-DD] [--force] [--preview]
   --preview opens the mail in Outlook for review instead of sending.
 """
 import argparse
 import json
 import os
+import threading
+import time
 import uuid
+from pathlib import Path
+from urllib.parse import quote
 
 import oracledb
 
+import ai
 import curate
 import db_conn
+import exec_summary as xs
+
+# ═══════════════════════════════════════════════ CONFIG (edit by hand)
+EXEC_SUMMARY = False            # True: the Turkish executive summary goes on top of the mail
+EXEC_SUMMARY_DRY_RUN = False    # True: write the mail WITH the summary to DRY_RUN_FILE; send nothing
+EXEC_SUMMARY_TIMEOUT = 120      # seconds for the whole summary (every model call); then mail without it
+# ════════════════════════════════════════════════════════════════════════
+
+DRY_RUN_FILE = Path(__file__).parent / "state" / "exec_summary_dry_run.html"
 
 
 def db_today(cur):
@@ -163,15 +190,17 @@ def _key_points(kps):
             'style="margin-top:8px;">' + "".join(rows) + "</table>")
 
 
-def _card(r, base_url):
+def _card(r, base_url, rnum=None):
     s = r.get("summary") or {}
     rid = r["id"]
-    read = f"{base_url}/reports/{rid}" if base_url else (r.get("source_path") or "#")
+    read = report_href(rid, base_url, r.get("source_path")) or "#"
     raw_title = r.get("title") or r.get("headline") or "(untitled)"
     title = esc(raw_title)
     line = summary_line(raw_title, s)
     authors = esc(", ".join(r["authors"])) if r.get("authors") else ""
     src_label = esc((r.get("source") or "").upper())
+    if rnum:                       # the card's own [R#]: the summary's citations point here
+        src_label = f"[{esc(rnum)}] {src_label}"
 
     inner = [f'<a href="{esc(read)}" style="font-family:{_SANS};font-size:18px;line-height:1.35;'
              f'font-weight:bold;color:{_INK};text-decoration:none;">{title}</a>']
@@ -203,7 +232,66 @@ def _card(r, base_url):
             f'{"".join(inner)}</td></tr></table>')
 
 
-def render(overview, reports, base_url):
+def report_href(rid, base_url, source_path=None):
+    """THE "read" target of a report - the cards and the summary's [R#] links both use it:
+    the web app's report page, else the report's own source link, else None."""
+    return f"{base_url}/reports/{quote(str(rid), safe='')}" if base_url else (source_path or None)
+
+
+def _model_ask(deadline, state):
+    """``ask(system, user)`` for exec_summary.write: one ai.chat call (the existing client,
+    called as curate.py calls it), its HTTP timeout cut to what is left of the time limit.
+    Past the limit it raises and marks ``state["timed_out"]``."""
+    def ask(system, user):
+        left = deadline - time.monotonic()
+        if left <= 1:
+            state["timed_out"] = True
+            raise TimeoutError("executive summary time limit reached")
+        try:
+            content, _ = ai.chat(system, user, temperature=0.2, max_tokens=2048, timeout=left)
+        except Exception:
+            if time.monotonic() >= deadline - 1:
+                state["timed_out"] = True
+            raise
+        return content
+    return ask
+
+
+def build_summary(sent, all_reports, date_str, base_url="", ask=None, timeout=None):
+    """The executive summary dict (exec_summary.summarize + "rnum"/"href"), or None: no
+    usable report, an error, or the time limit - the mail then goes out without it.
+    ``sent`` = the mail's reports (mail order), ``all_reports`` = the day's digest."""
+    timeout = EXEC_SUMMARY_TIMEOUT if timeout is None else timeout
+    deadline = time.monotonic() + timeout
+    state = {}
+    ask = ask or _model_ask(deadline, state)
+    box = {}
+
+    def work():
+        try:
+            picked = xs.pick_reports(sent, all_reports)
+            summary = xs.summarize(picked, ask, date_str)
+            if summary is not None:
+                summary["rnum"] = {r["id"]: "R%d" % i for i, r in enumerate(picked, 1)}
+                summary["href"] = {r["id"]: report_href(r["id"], base_url, r.get("source_path"))
+                                   for r in picked}       # digest-only reports link too
+            box["summary"] = summary
+        except Exception as exc:                 # noqa: BLE001 - the mail goes out without it
+            box["error"] = exc
+
+    worker = threading.Thread(target=work, name="exec-summary", daemon=True)
+    worker.start()
+    worker.join(max(timeout, 0))
+    if worker.is_alive() or state.get("timed_out"):
+        print(f"[summary] skipped: time limit ({timeout}s) reached; mailing without it.")
+        return None
+    if "error" in box:
+        print(f"[summary] skipped: {box['error']}")
+        return None
+    return box.get("summary")
+
+
+def render(overview, reports, base_url, summary=None):
     date = esc(overview.get("date", ""))
     n = overview.get("counts", {}).get("total", len(reports))
 
@@ -219,9 +307,18 @@ def render(overview, reports, base_url):
         f'<td height="2" bgcolor="{_ACCENT}" style="font-size:0;line-height:0;">&nbsp;</td>'
         f'</tr></table>')
 
+    hrefs = dict((summary or {}).get("href") or {})
+
+    def href(rid):
+        return hrefs.get(rid) or report_href(rid, base_url)
+
+    rnum = (summary or {}).get("rnum") or {}
     cards = []
+    if summary:
+        cards.append(xs.to_html(summary, href))
+        cards.append('<div style="height:16px;line-height:16px;font-size:0;">&nbsp;</div>')
     for r in reports:
-        cards.append(_card(r, base_url))
+        cards.append(_card(r, base_url, rnum.get(r["id"])))
         cards.append('<div style="height:16px;line-height:16px;font-size:0;">&nbsp;</div>')
 
     digest_link = ""
@@ -260,6 +357,8 @@ def render(overview, reports, base_url):
 
     # plain-text fallback (Outlook uses HTMLBody; kept for completeness)
     text = [f"Daily Research Digest - {overview.get('date','')} - {n} report(s)", ""]
+    if summary:
+        text += [xs.to_text(summary, href), ""]
     for r in reports:
         s = r.get("summary") or {}
         title = r.get("title") or r.get("headline") or "(untitled)"
@@ -269,7 +368,7 @@ def render(overview, reports, base_url):
             text.append("  " + line)
         if s.get("one_paragraph"):
             text.append("  " + s["one_paragraph"])
-        link = f"{base_url}/reports/{r['id']}" if base_url else (r.get("source_path") or "")
+        link = report_href(r["id"], base_url, r.get("source_path")) or ""
         if link:
             text.append("  " + link)
         text.append("")
@@ -321,7 +420,7 @@ def main():
     cur = con.cursor()
     date_str = args.date or db_today(cur)
 
-    if not args.force and already_sent(cur, date_str):
+    if not args.force and not EXEC_SUMMARY_DRY_RUN and already_sent(cur, date_str):
         print(f"Email already SENT for {date_str}; skipping (use --force).")
         con.close()
         return
@@ -333,6 +432,7 @@ def main():
         return
 
     reports = [r for r in (load_report(cur, rid) for rid in ids) if r]
+    all_reports = list(reports)               # the day's digest, for the summary's scan
 
     # AI curation: trim the email to the reports worth pushing. The web archive, the
     # homepage, and the "View full digest" link all still show every report.
@@ -347,7 +447,20 @@ def main():
 
     base = os.environ.get("WEBAPP_BASE_URL", "").rstrip("/")
     subject = f"Daily Research Digest - {date_str} - {len(reports)} report(s)"
-    html, text = render(overview, reports, base)
+    summary = None
+    if EXEC_SUMMARY or EXEC_SUMMARY_DRY_RUN:
+        summary = build_summary(reports, all_reports, date_str, base)
+        if summary:
+            print(f"[summary] {summary['status']}: {len(summary['bullets'])} bullet(s) over "
+                  f"{len(summary['refs'])} cited report(s).")
+    html, text = render(overview, reports, base, summary)
+
+    if EXEC_SUMMARY_DRY_RUN:
+        DRY_RUN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        DRY_RUN_FILE.write_text(html, encoding="utf-8")
+        print(f"[dry run] mail for {date_str} written to {DRY_RUN_FILE} - nothing sent, nothing logged.")
+        con.close()
+        return
 
     log_id = str(uuid.uuid4())
     recipients = os.environ.get("MAIL_TO", "")
