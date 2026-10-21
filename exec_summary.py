@@ -756,11 +756,50 @@ PROMPT_VER = "rs-5"
 NAME = "Araştırma özeti"
 TEMPLATE_HEADLINE = "Kurumların bugünkü görüşleri"
 
+#: Equity reports among the digest-only ones (beyond the mail's curated reports; owner, PR #3
+#: review). Curation keeps no exclude reasons, so three marks that ARE stored are read:
+#: the summary headline's asset class ("Equity, TR: ..."), the bank's own report types
+#: (REPORTS.REPORT_TYPES: Citi asset classes, JPM product category) and equity-only title words.
+EQUITY_WORDS = re.compile(r"\b(?:equit(?:y|ies)|stocks?|shares|single[- ]stocks?|earnings)\b", re.I)
+#: A report-type list that also names one of these is not equity-only (cross-asset etc.).
+NON_EQUITY_TYPES = re.compile(r"\b(?:rates?|fx|currenc\w*|foreign exchange|credit|fixed income|"
+                              r"macro\w*|econom\w*|commodit\w*|cross[- ]asset|multi[- ]asset|"
+                              r"sovereign\w*|bonds?|treasur\w*)\b", re.I)
+EQUITY_TITLE = re.compile(r"\b(?:earnings (?:preview|review|recap|results)|price targets?|"
+                          r"initiat\w* (?:of )?coverage|IPOs?|buybacks?|top (?:stock )?picks|"
+                          r"(?:upgrade|downgrade)s? to (?:buy|sell|hold|neutral|outperform|"
+                          r"underperform|equal[- ]weight))\b", re.I)
+
 #: Display names of the source keys (sources/*.py ``key``).
 SOURCE_NAMES = {"gs": "Goldman Sachs", "jpm": "JPMorgan", "citi": "Citi",
                 "ms": "Morgan Stanley", "db": "Deutsche Bank", "barc": "Barclays"}
 #: REPORT_SUMMARY.stance in Turkish ("n/a" never prints).
 STANCE_TR = {"bullish": "olumlu", "bearish": "olumsuz", "neutral": "nötr", "mixed": "karışık"}
+#: The template's verb per stance (owner, PR #3 review): what the bank expects for the
+#: instrument, without "olumlu/olumsuz görüşte". Bond-like instruments keep a verb with no
+#: direction (bullish on a bond is a price view, the label may name its yield).
+STANCE_VERB = {"olumlu": "yükseliş bekliyor", "olumsuz": "düşüş bekliyor",
+               "nötr": "yatay seyir bekliyor", "karışık": "karışık bir görüş bildiriyor"}
+STANCE_VERB_BOND = {"olumlu": "olumlu bakıyor", "olumsuz": "olumsuz bakıyor"}
+NO_STANCE_VERB = "yön belirtmiyor"
+BOND_LIKE = re.compile(r"\b(?:UST|Bunds?|JGBs?|gilts?|BTPs?|OATs?|treasur\w*|bonds?|tahvil\w*)\b", re.I)
+#: English instrument / asset-class words -> Turkish, for the template's labels only (the
+#: model's facts keep the report's own words). Longest phrase first; tickers and pairs stay.
+LABEL_TR = (
+    ("fed funds rate", "Fed fon faizi"), ("fed funds", "Fed fon faizi"),
+    ("policy rate", "politika faizi"), ("deposit rate", "mevduat faizi"),
+    ("real rates", "reel faiz"), ("interest rates", "faiz"), ("rates", "faiz"), ("rate", "faiz"),
+    ("yields", "getiri"), ("yield", "getiri"), ("bonds", "tahvil"), ("bond", "tahvil"),
+    ("yield curve", "getiri eğrisi"), ("curve", "eğri"), ("spreads", "makas"), ("spread", "makas"),
+    ("breakevens", "başabaş enflasyon"), ("inflation", "enflasyon"), ("CPI", "TÜFE"),
+    ("GDP", "GSYH"), ("growth", "büyüme"), ("unemployment", "işsizlik"),
+    ("labor market", "işgücü piyasası"), ("labour market", "işgücü piyasası"),
+    ("FX", "döviz"), ("currencies", "döviz"), ("credit", "kredi"), ("commodities", "emtia"),
+    ("oil", "petrol"), ("gold", "altın"), ("equities", "hisse senetleri"), ("macro", "makro"),
+    ("emerging markets", "gelişen piyasalar"), ("EM", "gelişen piyasalar"),
+    ("United States", "ABD"), ("US", "ABD"), ("UK", "Birleşik Krallık"), ("euro area", "Euro Bölgesi"),
+    ("Turkey", "Türkiye"), ("Turkiye", "Türkiye"), ("Japan", "Japonya"), ("China", "Çin"),
+)
 # ═════════════════════════════════════════════════════════════════════════════════════
 
 _TR_CHARS = re.compile(r"[çğıİöşüÇĞÖŞÜ]")
@@ -832,14 +871,28 @@ def usable(r: dict) -> bool:
     return not (subjects and subjects[0] in DROP_SUBJECTS)
 
 
+def is_equity(r: dict) -> bool:
+    """True when a stored mark says the report is equity research (see ``EQUITY_WORDS``):
+    its summary headline's asset class, its equity-only report types, or its title."""
+    head = (_summary(r).get("headline") or "").split(":", 1)[0].split(",", 1)[0]
+    if EQUITY_WORDS.search(head):
+        return True
+    types = [str(x) for x in r.get("report_types") or () if x]
+    if any(EQUITY_WORDS.search(x) for x in types) and not any(NON_EQUITY_TYPES.search(x) for x in types):
+        return True
+    return bool(EQUITY_TITLE.search(r.get("title") or ""))
+
+
 def pick_reports(mail_reports: list[dict], digest_reports: list[dict] = (),
                  max_reports: int = MAX_REPORTS) -> list[dict]:
     """The mail's reports in mail order, then the day's digest in digest order (owner D16),
-    each report once, ``usable`` only, at most ``max_reports``."""
+    each report once, ``usable`` only, at most ``max_reports``. The mail's reports passed
+    curation; a digest-only one is also left out when ``is_equity``."""
     out, seen = [], set()
+    mail_ids = {r.get("id") for r in mail_reports}
     for r in list(mail_reports) + list(digest_reports or ()):
         rid = r.get("id")
-        if rid in seen or not usable(r):
+        if rid in seen or not usable(r) or (rid not in mail_ids and is_equity(r)):
             continue
         seen.add(rid)
         out.append(r)
@@ -1121,13 +1174,37 @@ def _expand_one(text: str, spec: Spec) -> str:
     return "%s %s." % (body, "".join("[%s]" % i for i in ids)) if ids else body + "."
 
 
+_LABEL_MAP = {en.lower(): tr for en, tr in LABEL_TR}
+_LABEL_RE = re.compile(r"(?<![\w/])(%s)(?![\w/])" % "|".join(
+    re.escape(en) if en.isupper() else "(?i:%s)" % re.escape(en)
+    for en, _ in sorted(LABEL_TR, key=lambda x: -len(x[0]))))
+
+
+def label_tr(label: str) -> str:
+    """An instrument label in Turkish for the template ("policy rate" -> "Politika faizi",
+    "ECB deposit rate" -> "ECB mevduat faizi", "Rates, US" -> "Faiz, ABD"); tickers, pairs
+    and words it does not know stay as written. One pass, longest phrase first."""
+    out = _LABEL_RE.sub(lambda m: _LABEL_MAP[m.group(1).lower()], label or "").strip()
+    if out[:1] == "i":
+        return "İ" + out[1:]
+    return out[:1].upper() + out[1:]
+
+
+def stance_verb(label: str, stance: str | None) -> str:
+    """The template's verb: what the bank(s) expect for ``label`` under ``stance`` (Turkish)."""
+    if not stance:
+        return NO_STANCE_VERB
+    if BOND_LIKE.search(label or "") and stance in STANCE_VERB_BOND:
+        return STANCE_VERB_BOND[stance]
+    return STANCE_VERB.get(stance, NO_STANCE_VERB)
+
+
 def report_line(r: dict) -> str:
-    """The code's Turkish line for one report: "<bank>: <instrument> için <stance> görüş"."""
+    """The code's Turkish line for one report: "<instrument>: <bank> <verb>"."""
     inst = _instrument(r)
     stance = STANCE_TR.get((_summary(r).get("stance") or "").strip().lower())
-    what = inst[1] if inst else ((r.get("title") or "").strip() or "rapor")
-    return "%s: %s için %s görüş" % (source_name(r.get("source")), what, stance) if stance \
-        else "%s: %s raporu" % (source_name(r.get("source")), what)
+    what = inst[1] if inst else ((r.get("title") or "").strip() or "Rapor")
+    return "%s: %s %s" % (label_tr(what), source_name(r.get("source")), stance_verb(what, stance))
 
 
 def template(spec: Spec) -> dict:
@@ -1139,7 +1216,8 @@ def template(spec: Spec) -> dict:
         for stance, banks, _ in stance_lines(g):
             j += 1
             who = banks[0] if len(banks) == 1 else "%s ve %s" % (", ".join(banks[:-1]), banks[-1])
-            bullets.append("%s: %s %s görüşte [K%d]" % (g["label"], who, stance, j))
+            bullets.append("%s: %s %s [K%d]" % (label_tr(g["label"]), who,
+                                                stance_verb(g["label"], stance), j))
     covered = {m for g in spec.groups for m in g["reports"]}
     for i, r in enumerate(spec.reports, 1):
         if "R%d" % i not in covered:

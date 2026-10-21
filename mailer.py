@@ -79,19 +79,20 @@ def load_digest(cur, date_str):
 def load_report(cur, rid):
     cur.execute("""
         SELECT r.title, r.distribution_headline, r.authors, r.source_path, r.download_path,
-               s.summary_json, r.source, TO_CHAR(r.publication_date,'YYYY-MM-DD')
+               s.summary_json, r.source, TO_CHAR(r.publication_date,'YYYY-MM-DD'), r.report_types
         FROM reports r LEFT JOIN report_summary s ON s.report_id = r.report_id
         WHERE r.report_id = :id
     """, {"id": rid})
     row = cur.fetchone()
     if not row:
         return None
-    title, headline, authors_b, src, dl, sj, source, pub_date = row
+    title, headline, authors_b, src, dl, sj, source, pub_date, rtypes_b = row
     return {
         "id": rid, "title": title, "headline": headline,
         "authors": db_conn.as_json(authors_b) or [],
         "source_path": src, "download": dl, "source": source or "gs",
         "date": pub_date,
+        "report_types": db_conn.as_json(rtypes_b) or [],     # the bank's own labels (summary's equity rule)
         "summary": db_conn.as_json(sj) or {},
     }
 

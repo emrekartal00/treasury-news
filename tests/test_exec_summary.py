@@ -107,6 +107,28 @@ def test_reports_without_subjects_are_kept():
     assert len(xs.pick_reports([REPORTS["SYN-R1"]], [])) == 1
 
 
+def _equity(rid, **kw):
+    r = dict(REPORTS["SYN-R5"], id=rid, **{k: v for k, v in kw.items() if k != "headline"})
+    if "headline" in kw:
+        r["summary"] = dict(r["summary"], headline=kw["headline"])
+    return r
+
+
+def test_digest_only_equity_reports_are_left_out():
+    by_headline = _equity("EQ1", headline="Equity, TR: report upgrades Turkish banks")
+    by_type = _equity("EQ2", report_types=["Equities", "Europe"])
+    by_title = _equity("EQ3", title="Example: Q3 earnings preview")
+    cross = _equity("XA1", report_types=["Equities", "Rates", "FX"])        # cross-asset stays
+    macro = _equity("MAC", title="Example: price stability and the CBRT")
+    ids = [r["id"] for r in xs.pick_reports(mail_reports(), [by_headline, by_type, by_title, cross, macro])]
+    assert ids == MAIL_IDS + ["XA1", "MAC"]
+
+
+def test_a_mailed_report_is_never_second_guessed():
+    mailed = _equity("EQ1", headline="Equity, TR: report upgrades Turkish banks")
+    assert [r["id"] for r in xs.pick_reports([mailed], [mailed])] == ["EQ1"]
+
+
 # ───────────────────────────────────────────── facts and slots
 def test_one_count_fact_per_stance_stands_for_its_own_reports_only():
     spec = xs.build_spec(_reports(), LABEL)
@@ -184,9 +206,29 @@ def test_think_blocks_fences_and_trailing_text_are_parsed():
 def test_template_groups_agreeing_reports_and_gives_dissent_its_own_line():
     s = xs.summarize(_reports(), None, LABEL)
     assert s["status"] == xs.NO_MODEL
-    usd = [b for b in s["bullets"] if b.startswith("USD/TRY")]
-    assert usd == ["USD/TRY: Barclays nötr görüşte [R6].", "USD/TRY: Goldman Sachs olumlu görüşte [R2].",
-                   "USD/TRY: Citi olumsuz görüşte [R4]."]
+    assert s["bullets"] == [
+        "USD/TRY: Barclays yatay seyir bekliyor [R6].",
+        "USD/TRY: Goldman Sachs yükseliş bekliyor [R2].",
+        "USD/TRY: Citi düşüş bekliyor [R4].",
+        "Politika faizi: JPMorgan ve Morgan Stanley düşüş bekliyor [R1][R3].",   # one line, two reports
+        "UST 10Y: Deutsche Bank yatay seyir bekliyor [R5]."]
+    assert not any("görüşte" in b or "policy rate" in b for b in s["bullets"])
+
+
+def test_template_labels_are_turkish_and_tickers_stay():
+    assert xs.label_tr("policy rate") == "Politika faizi"
+    assert xs.label_tr("ECB deposit rate") == "ECB mevduat faizi"
+    assert xs.label_tr("Rates, US") == "Faiz, ABD"
+    assert xs.label_tr("inflation, Turkey") == "Enflasyon, Türkiye"
+    assert [xs.label_tr(x) for x in ("USD/TRY", "UST 10Y", "EUR/USD")] == ["USD/TRY", "UST 10Y", "EUR/USD"]
+
+
+def test_template_verb_follows_the_stance_without_a_direction_on_bonds():
+    assert xs.stance_verb("politika faizi", "olumsuz") == "düşüş bekliyor"
+    assert xs.stance_verb("USD/TRY", "olumlu") == "yükseliş bekliyor"
+    assert xs.stance_verb("UST 10Y", "olumlu") == "olumlu bakıyor"     # price view, label may be a yield
+    assert xs.stance_verb("Bund", "nötr") == "yatay seyir bekliyor"
+    assert xs.stance_verb("USD/TRY", None) == "yön belirtmiyor"
 
 
 def test_model_error_is_the_template_not_a_crash():
@@ -300,3 +342,15 @@ def test_dry_run_writes_the_html_and_sends_nothing(tmp_path, monkeypatch):
     mailer.main()
     html = out.read_text(encoding="utf-8")
     assert "Kurumlar kurda ayrışıyor, faizde birleşiyor" in html and "%36 ve %35" in html
+
+
+def test_load_report_carries_the_banks_report_types():
+    class Cur:
+        def execute(self, sql, params):
+            assert "r.report_types" in sql
+
+        def fetchone(self):
+            return ("T", None, b'[]', None, None, b'{"headline": "h"}', "citi", DAY,
+                    b'["Equities", "Europe"]')
+    r = mailer.load_report(Cur(), "X1")
+    assert r["report_types"] == ["Equities", "Europe"] and xs.is_equity(r)
