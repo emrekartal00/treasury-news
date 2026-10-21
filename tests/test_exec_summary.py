@@ -6,6 +6,7 @@ Every report here is MADE UP (bank keys are the source keys, titles / views / nu
 only for shape); the model is a fake ``ask`` or a monkeypatched ``ai.chat``; nothing is sent,
 no database is touched. Runs with ``python -m pytest``.
 """
+import dataclasses
 import json
 import re
 import sys
@@ -193,11 +194,20 @@ def _verdict(bullet):
     "JPMorgan politika faizini {R1.n1} kat öngörüyor [R1].",
     "JPMorgan politika faizini {R1.n1} milyar öngörüyor [R1].",
     "JPMorgan politika faizini {R1.n1}{R1.n2} öngörüyor [R1].",
-    "Deutsche Bank getirinin {R5.n1}–{R5.n2} aralığında kalacağını öngörüyor [R5].",
     "Deutsche Bank getirinin {R5.n1}, {R5.n2} aralığında kalacağını öngörüyor [R5].",
+    "Deutsche Bank getirinin {R5.n1} {R5.n2} aralığında kalacağını öngörüyor [R5].",
+    "JPMorgan ve Goldman Sachs {R1.n1}–{R2.n1} görüyor [R1][R2].",          # a range of TWO sources
+    "JPMorgan politika faizini {R1.n1}lik öngörüyor [R1].",
+    "JPMorgan politika faizini {R1.n1} TL öngörüyor [R1].",
 ])
 def test_no_unit_sign_or_second_slot_next_to_a_slot(bullet):
-    assert any("yuva" in e and ("yanında" in e or "yan yana" in e) for e in _verdict(bullet)), bullet
+    assert any("yuva" in e and ("yapışık" in e or "birim" in e or "ikinci yuva" in e)
+               for e in _verdict(bullet)), bullet
+
+
+def test_a_dash_range_of_one_source_is_allowed():
+    """PRISMA pass-6 owner decision: "{a}–{b}" only as a range of one source."""
+    assert _verdict("Deutsche Bank getirinin {R5.n1}–{R5.n2} aralığında kalacağını öngörüyor [R5].") == []
 
 
 @pytest.mark.parametrize("bullet,word", [
@@ -210,6 +220,10 @@ def test_no_unit_sign_or_second_slot_next_to_a_slot(bullet):
     ("JPMorgan faizi %³⁶ öngörüyor [R1].", "³"),
     ("JPMorgan faizde ½ puan indirim bekliyor [R1].", "½"),
     ("JPMorgan faizde twice indirim bekliyor [R1].", "twice"),
+    ("JPMorgan indirimlerin ikincisini aralıkta bekliyor [R1].", "ikincisini"),
+    ("JPMorgan indirimin yarısını aralıkta bekliyor [R1].", "yarısını"),
+    ("JPMorgan indirimin çeyreğini aralıkta bekliyor [R1].", "çeyreğini"),
+    ("JPMorgan faizde üçüncüsü olan indirimi bekliyor [R1].", "üçüncüsü"),
 ])
 def test_numbers_without_digits_are_refused(bullet, word):
     assert any("kendi yazdığın sayı: %s" % word in e for e in _verdict(bullet)), bullet
@@ -222,19 +236,57 @@ def test_a_dotted_roman_numeral_is_refused_too():
 @pytest.mark.parametrize("bullet", [
     "JPMorgan USD/TRY için {R1.n1} öngörüyor [R1].",                 # R1.n1 is the policy rate
     "Goldman Sachs politika faizi için {R2.n1} öngörüyor [R2].",      # R2.n1 is USD/TRY
-    "Kurumlar {K4.c1} kurumla ayrışıyor [K4].",                       # count without its topic
 ])
-def test_a_slot_is_bound_to_its_topic(bullet):
-    assert any("konusunun sayısı" in e for e in _verdict(bullet)), bullet
+def test_a_value_is_bound_to_its_own_series(bullet):
+    assert any("serisinin değeri" in e for e in _verdict(bullet)), bullet
+
+
+def test_the_series_is_per_number_not_per_report():
+    """One report, two series: each number keeps the series written before it in the report."""
+    two = _r("SYN-T1", "gs", "Example: two calls", "Rates, TRY: report sees cuts and a weaker lira",
+             "bearish", ["policy rate", "USD/TRY"],
+             ["Policy rate seen at 36% by year end.", "USD/TRY seen at 15.20 by year end."])
+    spec = xs.build_spec([two], LABEL)
+    by_display = {s.display: s.series for s in spec.slots.values() if s.kind == "value"}
+    assert by_display["%36"] == "policy rate" and by_display["15,20"] == "usd/try"
+    good = "Goldman Sachs politika faizini {R1.n1}, USD/TRY kurunu {R1.n2} öngörüyor [R1]."
+    swapped = "Goldman Sachs politika faizini {R1.n2}, USD/TRY kurunu {R1.n1} öngörüyor [R1]."
+    ids = {s.display: s.id for s in spec.slots.values() if s.kind == "value"}
+    good = good.replace("{R1.n1}", "{%s}" % ids["%36"]).replace("{R1.n2}", "{%s}" % ids["15,20"])
+    swapped = swapped.replace("{R1.n1}", "{%s}" % ids["%36"]).replace("{R1.n2}", "{%s}" % ids["15,20"])
+    assert not any("serisinin" in e for e in xs.check_numbers(good, spec))
+    assert any("serisinin" in e for e in xs.check_numbers(swapped, spec))
+
+
+@pytest.mark.parametrize("bullet", [
+    "JPMorgan ECB mevduat faizini {R7.l1} olarak öngörüyor [R7].",            # R7.l1 = "4. çeyrek"
+    "JPMorgan ECB mevduat faizinin {R7.l1} seviyesinde kalacağını öngörüyor [R7].",
+    "Goldman Sachs USD/TRY kurunu {R2.l1} öngörüyor [R2].",
+    "Goldman Sachs USD/TRY için {R2.l1} ile {R2.n1} arasında bir seyir bekliyor [R2].",
+])
+def test_a_label_slot_is_never_a_value(bullet):
+    assert any("etiket" in e for e in _verdict(bullet)), bullet
 
 
 @pytest.mark.parametrize("bullet", [
     "UBS ve JPMorgan politika faizini {R1.n1} öngörüyor [R1].",
     "Nomura Securities politika faizinde düşüş bekliyor [R1].",
     "Örnek Banka A politika faizinde düşüş bekliyor [R1].",
+    "Pictet politika faizini {R1.n1} öngörüyor [R1].",
+    "İş Yatırım politika faizini {R1.n1} öngörüyor [R1].",
+    "Garanti BBVA politika faizini {R1.n1} öngörüyor [R1].",
+    "Kuveyt Türk Menkul politika faizini {R1.n1} öngörüyor [R1].",
+    "JPMorgan gibi Yapı Kredi de politika faizini {R1.n1} öngörüyor [R1].",
+    "Citibank politika faizini {R1.n1} öngörüyor [R1].",                # Citi, but R1 is JPMorgan's
 ])
-def test_unknown_bank_names_are_refused(bullet):
-    assert any("tanınmayan kurum adı" in e for e in _verdict(bullet)), bullet
+def test_unknown_or_uncited_bank_names_are_refused(bullet):
+    assert any("kurum" in e or "özel ad" in e for e in _verdict(bullet)), bullet
+
+
+def test_bank_spellings_of_a_cited_source_pass():
+    for bullet in ("Citibank USD/TRY hedefini {R4.n1} görüyor [R4].",
+                   "J. P. Morgan politika faizini {R1.n1} öngörüyor [R1]."):
+        assert _verdict(bullet) == [], bullet
 
 
 def test_central_banks_are_not_unknown_sources():
@@ -247,13 +299,18 @@ def test_central_banks_are_not_unknown_sources():
     "JPMorgan politika faizinde artış beklemeyecek [R1].",
     "JPMorgan politika faizinde indirim görmüyor [R1].",
     "JPMorgan politika faizinde indirim tahmin etmiyor [R1].",
+    "JPMorgan politika faizinde indirim yapılmadığını yazıyor [R1].",
+    "JPMorgan politika faizinin düşmeyeceğini yazıyor [R1].",
+    "JPMorgan politika faizinde indirimin olası değil olduğunu yazıyor [R1].",
+    "JPMorgan politika faizinde indirimi dışlıyor [R1].",
+    "JPMorgan does not expect a cut [R1].",
 ])
-def test_negated_forecast_verbs_are_refused(bullet):
-    assert any("olumsuz tahmin fiili" in e for e in _verdict(bullet)), bullet
+def test_negation_beyond_forecast_verbs_is_refused(bullet):
+    assert any("olumsuz" in e for e in _verdict(bullet)), bullet
 
 
 def test_positive_forecast_verbs_pass():
-    assert xs.negated_forecasts("bekliyor, öngörüyor, beklemektedir, beklemeye devam ediyor, görüyor") == []
+    assert xs.negations("bekliyor, öngörüyor, beklemektedir, beklemeye devam ediyor, görüyor") == []
 
 
 def test_negation_in_the_headline_and_unknown_bank_in_the_headline_are_refused():
@@ -265,7 +322,7 @@ def test_negation_in_the_headline_and_unknown_bank_in_the_headline_are_refused()
 def test_the_final_re_read_compares_every_filled_number_with_its_report():
     spec = xs.build_spec(_reports(), LABEL)
     assert xs.reread(GOOD, spec) == []
-    bad = xs.replace(spec.slots["R1.n1"], display="%37")           # a fill that drifted
+    bad = dataclasses.replace(spec.slots["R1.n1"], display="%37")  # a fill that drifted
     spec.slots["R1.n1"] = bad
     assert any("R1.n1" in e and "kaynağında yok" in e for e in xs.reread(GOOD, spec))
     calls = []
@@ -273,13 +330,40 @@ def test_the_final_re_read_compares_every_filled_number_with_its_report():
     assert s["status"] == xs.TEMPLATE and "%37" not in " ".join(s["bullets"])
 
 
+def test_the_re_read_uses_the_normalised_source_so_word_tenors_pass():
+    r = _r("SYN-W1", "barc", "Example: word tenor", "FX, TRY: report sees USD/TRY stable", "neutral",
+           ["USD/TRY"], ["USD/TRY seen near 15.00 over one month."])
+    spec = xs.build_spec([r], LABEL)
+    ids = {s.display: s.id for s in spec.slots.values()}
+    out = {"baslik": "Kurda yatay seyir", "maddeler": [
+        "Barclays USD/TRY kurunun {%s} içinde {%s} civarında kalacağını öngörüyor [R1]." % (
+            ids["1 aylık"], ids["15,00"])]}
+    assert xs.reread(out, spec) == []
+
+
+def test_a_brace_is_never_published():
+    spec = xs.build_spec(_reports(), LABEL)
+    for b in ("JPMorgan politika faizini {{R1.n1}} öngörüyor [R1].", "JPMorgan {hedef} öngörüyor [R1].",
+              "JPMorgan politika faizini {R1.n1 öngörüyor [R1]."):
+        out = dict(GOOD, maddeler=GOOD["maddeler"][:3] + [b])
+        assert any("parantez" in e for e in xs.validate(out, spec) + xs.reread(out, spec)), b
+        s = xs.summarize(_reports(), _ask(out), LABEL)
+        assert s["status"] != xs.VERIFIED and not any(ch in "{}" for ch in "".join(s["bullets"]))
+
+
+def test_a_direction_word_far_from_its_slot_still_counts():
+    # R1.n3 = 150 baz puan, a cut; "artış" four words later must still be seen
+    assert any("yönü" in e for e in _verdict(
+        "JPMorgan aralıkta {R1.n3} tutarında ve beklenenden daha büyük bir artış bekliyor [R1]."))
+
+
 def test_the_slot_table_shows_bank_and_topic():
     spec = xs.build_spec(_reports(), LABEL)
-    assert "{R1.n1} = %36 (JPMorgan, konu: Politika faizi)" in spec.user
+    assert "{R1.n1} = %36 (JPMorgan, policy rate)" in spec.user
 
 
 def test_ordinary_words_are_not_numbers():
-    assert xs.raw_numbers("Kurumlar yarın açıklanacak veriyi izliyor; altında kalıyor [R1].") == []
+    assert xs.raw_numbers("Kurumlar yarın açıklanacak veriyi izliyor; altında kalıyor, onun yanında [R1].") == []
 
 
 @pytest.mark.parametrize("bullet", [

@@ -2,9 +2,13 @@
 
 Owner decision D17 (2026-10-20): the research EXECUTIVE SUMMARY goes into the live mail now,
 i.e. here, in treasury-news. It is a port of the design in treasury-report (branch
-mks-exec-summary, PRs #176/#179: ``platform_kernel/research_summary.py`` with its readers
-``number_gate`` / ``claim_gate`` / ``number_slots``), folded into ONE file so the office copy
-stays small. Keep the two in step when the design changes.
+mks-exec-summary, PRs #176/#179, pr-review pass 6 b2dfb139: ``platform_kernel/research_summary.py``
+with its readers ``number_gate`` / ``claim_gate`` / ``number_slots``), folded into ONE file so
+the office copy stays small. Keep the two in step when the design changes. On top of pass 6,
+treasury-news PR #3 reviews add: unknown proper nouns before a value (``unknown_names``), label
+slots never as values (``VALUE_AFTER``), the direction read over the whole stretch between
+slots, suffixed number words, and a final re-read of every value against its own
+normalised source (``reread``).
 
 "Code picks the facts, the model only writes from them":
 
@@ -13,11 +17,13 @@ stays small. Keep the two in step when the design changes.
   build_spec()    one fact line per report ([R1]..[Rn], in that order) and, for every
                   instrument several banks wrote about, one line per STANCE ([K1]..): the
                   banks holding it and their reports (code counts).
-  NUMBER SLOTS    every digit-bearing span of a fact line becomes a slot ({R3.n1} = "%36"),
-                  the model sees only slot ids, writes only slot ids, and ``fill_slots`` puts
-                  the report's exact value in. A digit or number word the model writes itself
-                  fails the check (``check_slots``), as does a slot whose report is not cited,
-                  a bank named without its report cited, a slot next to the wrong bank.
+  NUMBER SLOTS    every digit-bearing span of a fact line becomes a TYPED slot ({R3.n1} =
+                  "%36", bank, series, role); the model sees and writes only slot ids, and
+                  ``fill_slots`` puts the report's exact value in. ``check_slots`` refuses a
+                  number the model wrote itself, anything glued to a slot, an uncited slot, a
+                  bank without its cited report, a value under another series, a label used
+                  as a value, a contradicting direction, a negated verb; ``verify_filled`` and
+                  ``reread`` read the FILLED sentence again.
   write()         ONE model call writes a headline + 3-5 bullets; EVERY sentence ends with the
                   report(s) it comes from, agreeing reports under ONE claim ("... [R3][R7]"),
                   dissent on its own line. Two attempts with the errors fed back, then the
@@ -43,7 +49,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 
 # ##########################################################################################
@@ -272,11 +278,31 @@ MAX_VALUES = 2
 #: sensitively as whole words; the rest case-insensitively (pr-review pass 4, owner list).
 BANK_ALIASES = {
     "Goldman Sachs": ("Goldman Sachs", "Goldman", "GS"),
-    "JPMorgan": ("J.P. Morgan", "JP Morgan", "JPMorgan", "JPM"),
+    "JPMorgan": ("JPMorgan Chase", "J.P. Morgan", "J. P. Morgan", "J.P.Morgan", "JP Morgan", "JPMorgan", "JPM"),
     "Morgan Stanley": ("Morgan Stanley", "MS"),
     "Deutsche Bank": ("Deutsche Bank", "Deutsche", "DB"),
-    "Citi": ("Citigroup", "Citi"),
+    "Citi": ("Citigroup", "Citibank", "Citi"),
     "Barclays": ("Barclays", "BARC"),
+    # not research sources today: named only so a sentence that names them is REFUSED (no cited
+    # report of theirs can exist) - pr-review pass 6
+    "HSBC": ("HSBC",),
+    "Nomura": ("Nomura",),
+    "Bank of America": ("Bank of America", "BofA", "Merrill Lynch", "Merrill", "BAML"),
+    "UBS": ("UBS",),
+    "BNP Paribas": ("BNP Paribas", "BNP"),
+    "Société Générale": ("Société Générale", "Societe Generale", "SocGen"),
+    "Credit Suisse": ("Credit Suisse",),
+    "Commerzbank": ("Commerzbank",),
+    "Wells Fargo": ("Wells Fargo",),
+    "Standard Chartered": ("Standard Chartered", "StanChart"),
+    "ING": ("ING",),
+    "Natixis": ("Natixis",),
+    "Santander": ("Santander",),
+    "Mizuho": ("Mizuho",),
+    "Bloomberg Economics": ("Bloomberg Economics",),
+    "Fitch": ("Fitch",),
+    "Moody's": ("Moody's",),
+    "S&P": ("S&P Global", "Standard & Poor's"),
 }
 #: Direction words (token prefixes, lower case) near a number: a source's direction and the
 #: sentence's must not contradict.
@@ -442,21 +468,26 @@ def mask_digits(text: str) -> str:
 
 
 # ───────────────────────────────────────────── sentences
-_BOUNDARY = re.compile(r"[.!?;](?=\s|[A-ZÇĞİÖŞÜa-zçğıöşü\[])")
-_NO_END = re.compile(r"(?:(?:^|\s)\d{1,2}\.$)|(?:(?:^|[\s(])(?:[A-Z]\.\s?)*[A-Z]\.$)|"
+_BOUNDARY = re.compile(r"[.!?;:](?=\s|[A-ZÇĞİÖŞÜa-zçğıöşü\[])|\n+")
+_NO_END = re.compile(r"(?:(?:^|\s)\d{1,2}\.$)|(?:(?:^|[\s(])(?:[A-ZÇĞİÖŞÜ]\.\s?)*[A-ZÇĞİÖŞÜ]\.$)|"
                      r"(?:\b(?:vb|vs|örn|bkz|yak|dr|no|st|inc|co|ltd|corp)\.$)", re.I)
 
 
-def split_sentences(text: str) -> list[str]:
-    """Sentences of a bullet (see the module docstring)."""
+def split_sentences(text: str, colon: bool = True) -> list[str]:
+    """Sentences of a bullet (see the module docstring). ``colon=False``: a colon does not
+    split (code-made lines such as the template's "USD/TRY: ...")."""
     text = (text or "").strip()
     out, start = [], 0
     for m in _BOUNDARY.finditer(text):
+        if m.group(0) == ":" and not colon:
+            continue
         head = text[start:m.end()]
         if text.rfind("{", 0, m.start()) > text.rfind("}", 0, m.start()):
             continue                       # inside a slot id ({R1.n1})
         if m.group(0) == "." and _NO_END.search(head):
             continue
+        if m.group(0) == ":" and re.search(r"\d$", head[:-1]):
+            continue                       # "10:30"
         rest = text[m.end():]
         if not _CG_CITE.sub("", rest.split(".")[0] if rest.strip().startswith("[") else "x").strip(" "):
             continue                       # "... yaptı. [R2]": the citation stays with it
@@ -482,30 +513,56 @@ def split_sentences(text: str) -> list[str]:
 
 SLOT = re.compile(r"\{([A-ZÇ]+\d+)\.([a-z]+\d*)\}")
 _NS_CITE = re.compile(r"\[[A-ZÇ]+\d+\]")
-#: Number words the model might write instead of a slot (Turkish + English, lower case).
-#: "bir" is left out on purpose: it is also the indefinite article.
-NUMBER_WORDS = tuple(w for w in list(_TR_ONES) + list(_TR_TENS) + ["yüz", "bin", "milyon", "milyar"]
-                     + list(_EN_SMALL) + ["twenty", "thirty", "forty", "fifty", "hundred"]
-                     if w != "bir")
-#: Number words with a Turkish ordinal / distributive / fraction suffix ("ikinci", "üçte",
-#: "onar", "binde"), counted words, fractions and English ordinals (PR #3 review: a number
-#: must never reach the mail without digits either).
-_NUM_STEMS = sorted(list(_TR_ONES) + list(_TR_TENS) + ["dörd", "yüz", "bin", "milyon", "milyar"],
-                    key=len, reverse=True)
-_NUM_SUFFIXED = re.compile(r"^(?:%s)(?:inci|ıncı|uncu|üncü|nci|ncı|ncu|ncü|de|da|te|ta|şer|şar|er|ar|"
-                           r"lerce|larca|ler|lar)$" % "|".join(_NUM_STEMS))
-NUMBER_WORDS_EXTRA = ("yarım", "yarı", "yarısı", "yarısını", "yarısına", "yarısında", "buçuk",
-                      "çift", "tek", "düzine", "onlarca", "yüzlerce", "binlerce", "milyonlarca",
-                      "half", "halves", "quarter", "quarters", "double", "twice", "triple",
-                      "dozen", "dozens", "thousand", "million", "billion", "trillion", "percent",
-                      "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth",
-                      "ninth", "tenth", "hundredth", "thousandth")
-NUMBER_PREFIXES = ("çeyrek", "yarıyıl", "buçuk", "düzine", "quarter")
-_ROMAN = re.compile(r"(?<![\w])(?=[MDCLXVI])M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})(?![\w])")
+
+# ════════════════════════════════════════════════════════════════════════════ SETTINGS
+#: Number words: a token made of these stems (+ a numeral suffix) is a number the model wrote
+#: itself ("iki", "otuzaltı", "ikinci", "üçte", "beşer"). "bir" stays out (it is also "a").
+NUMBER_STEMS = ("sıfır", "iki", "üç", "dört", "beş", "altı", "yedi", "sekiz", "dokuz", "on",
+                "yirmi", "otuz", "kırk", "elli", "altmış", "yetmiş", "seksen", "doksan", "yüz",
+                "bin", "milyon", "milyar", "trilyon")
+NUMBER_SUFFIXES = ("", "nci", "ncı", "ncu", "ncü", "inci", "ıncı", "uncu", "üncü", "si", "sı",
+                   "su", "sü", "i", "ı", "u", "ü", "te", "ta", "de", "da", "er", "ar", "şer",
+                   "şar", "lik", "lık", "luk", "lük", "li", "lı", "lu", "lü")
+NUMBER_TOKENS = ("çeyrek", "yarım", "buçuk", "düzine", "yarısı", "yüzde", "binde", "eksi", "artı",
+                 "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+                 "eleven", "twelve", "twenty", "thirty", "forty", "fifty", "hundred", "half",
+                 "quarter", "dozen", "percent")
+#: Words that may not stand next to a slot (the slot renders its own unit).
+UNIT_WORDS = ("baz", "puan", "puanlık", "bp", "bps", "kat", "katı", "katına", "katlık", "kez",
+              "yüzde", "percent", "pct", "eksi", "artı", "minus", "plus")
+#: Words a value is the object of: a LABEL slot right after them is used as a value.
+LEVEL_WORDS = ("faiz", "faizi", "faizini", "oran", "oranı", "oranını", "kur", "kuru",
+               "seviye", "seviyesi", "düzey", "düzeyi", "değer", "değeri", "hedef", "hedefi",
+               "beklenti", "beklentisi", "tahmin", "tahmini", "getiri", "getirisi", "fiyat", "fiyatı")
+#: Words right after a date / year / period / tenor slot that make it a value (PR #3 review:
+#: a label slot is never a value): "{l1} seviyesinde", "{l1} olarak", "{l1} öngörüyor".
+VALUE_AFTER = ("seviye", "düzey", "olarak", "olacağ", "olduğ", "oranında", "civarında", "arasında",
+               "üzerinde", "altında", "öngör", "bekl", "görüyor", "tahmin", "hedefl", "yüksel",
+               "düşe", "düşü", "geril", "artı", "artacağ")
+#: English source series -> how a Turkish sentence may write them (lower case). A value slot
+#: written under a DIFFERENT series name than its own is refused.
+SERIES_ALIASES = {
+    "policy rate": ("politika faizi", "politika faizini", "policy rate", "repo faizi"),
+    "deposit rate": ("mevduat faizi", "deposit rate"),
+    "ecb deposit rate": ("ecb mevduat faizi", "ecb deposit rate"),
+    "usd/try": ("usd/try", "dolar/tl", "dolar/türk lirası", "dolar kuru"),
+    "eur/try": ("eur/try", "euro/tl", "euro kuru"),
+    "eur/usd": ("eur/usd", "euro/dolar", "parite"),
+}
+#: Negated verbs: a negated forecast would invert the source's claim.
+_NEGATION = re.compile(r"\b\w+m[ıiuü]yor\w*|\b\w+(?:ma|me)(?:z|dı|di|dığı|diği|mış|miş|yacak|yecek"
+                       r"|yacağ|yeceğ)\w*|\bdeğil\w*|\bdışl[ıi]\w*|\bolmayaca\w*|\bolmadığ\w*")
+# ═════════════════════════════════════════════════════════════════════════════════════
+
 _TENOR_EN = re.compile(r"(\d{1,3})\s?-?\s?(y|yr|yrs|years?|m|months?|w|weeks?|d|days?)$", re.I)
 _TENOR_TR = {"y": "yıllık", "m": "aylık", "w": "haftalık", "d": "günlük"}
 _UNIT_TAIL_TR = re.compile(r"^(\s*(?:(?:milyar|milyon|bin)\s+)?(?:TL|USD|EUR|ABD doları|baz puan|puan)\b)")
 _SIGN_BEFORE = re.compile(r"(?:^|[\s(])([−+-])\s?%?$")     # a range dash ("4.10%-4.40%") is not a sign
+_BAND = re.compile(r"\(\s*p10\s*[–-]\s*p90\s*:\s*([^)]*)\)", re.I)
+_PCTL_AFTER = re.compile(r"^\s*yüzdeli", re.I)
+_NUMWORD = re.compile(r"^(?:%s)+(?:%s)$" % ("|".join(sorted(NUMBER_STEMS, key=len, reverse=True)),
+                                            "|".join(sorted(NUMBER_SUFFIXES, key=len, reverse=True))))
+_ROMAN = re.compile(r"\b[IVXLCDM]{2,}\b")
 
 
 @dataclass(frozen=True)
@@ -516,8 +573,8 @@ class Slot:
     kind: str            # "value" | "label" | "count"
     bank: str | None = None
     sign: int = 0        # -1 down / +1 up / 0 unknown (values)
-    topic: tuple = ()    # instrument keys of its source (``instrument_key``): the claim names one
-    topic_label: str | None = None
+    role: str = "level"  # level | band | pctl | count | date | year | period | tenor | name
+    series: str | None = None
 
 
 # ───────────────────────────────────────────── formatting (code, Turkish)
@@ -544,14 +601,50 @@ def _period_tr(span: str) -> str:
     return "%s. %s" % (m.group(2), "çeyrek" if m.group(1).upper() == "Q" else "yarıyıl")
 
 
+def _tr_lower(text: str) -> str:
+    return (text or "").replace("İ", "i").replace("I", "ı").lower()
+
+
+def series_key(name: str | None) -> str | None:
+    """A series name -> its canonical key (``SERIES_ALIASES``), else its own lower case."""
+    if not name:
+        return None
+    low = _tr_lower(name).strip()
+    for key, aliases in SERIES_ALIASES.items():
+        if low == key or low in aliases:
+            return key
+    return low
+
+
+def _series_mentions(text: str, names) -> list[tuple[int, int, str]]:
+    """``[(start, end, series key)]`` of the series names a text writes, longest first."""
+    low = _tr_lower(text)
+    cands = {}
+    for n in names or ():
+        k = series_key(n)
+        for form in {_tr_lower(n)} | set(SERIES_ALIASES.get(k, ())):
+            if form:
+                cands[form] = k
+    hits, taken = [], []
+    for form in sorted(cands, key=len, reverse=True):
+        for m in re.finditer(r"(?<!\w)%s(?!\w)" % re.escape(form), low):
+            if any(m.start() < e and s < m.end() for s, e in taken):
+                continue
+            taken.append((m.start(), m.end()))
+            hits.append((m.start(), m.end(), cands[form]))
+    return sorted(hits)
+
+
 # ───────────────────────────────────────────── reading a source into slots
 def _spans(text: str, names) -> list[tuple[int, int, str, str]]:
-    """``[(start, end, kind, display)]`` of every label span, in text order, no overlap."""
+    """``[(start, end, role, display)]`` of every label/band span, in text order, no overlap."""
     taken: list[tuple[int, int, str, str]] = []
 
-    def add(s, e, kind, display):
+    def add(s, e, role, display):
         if not any(s < e2 and s2 < e for s2, e2, _, _ in taken):
-            taken.append((s, e, kind, display))
+            taken.append((s, e, role, display))
+    for m in _BAND.finditer(text):
+        add(m.start(), m.end(), "band", "p10–p90 bandı %s" % m.group(1).strip())
     for m in re.finditer(r"\b\d{1,2}\s+(?:%s)(?:\s+(?:19|20)\d{2})?\b" % _MONTHS, text, re.I):
         add(m.start(), m.end(), "date", m.group(0))
     for m in _ISO.finditer(text):
@@ -590,19 +683,30 @@ def _owners_in(masked: str, values) -> list[str | None]:
 
 
 def slots_for(source_id: str, text: str, names=(), bank: str | None = None,
-              turkish: bool = False, banks_from_text: bool = False) -> tuple[str, list[Slot]]:
-    """``(text with slot ids, slots)`` of one source. ``bank`` owns its value slots, or with
-    ``banks_from_text`` each value belongs to the bank the text writes next to it (a deck
-    fact that quotes several banks); ``turkish`` keeps the source's own number text and unit
-    ("14,8302 TL") instead of re-formatting an English number ("15.20" -> "15,20", "36%" ->
-    "%36", "150bp" -> "150 baz puan")."""
+              turkish: bool = False, banks_from_text: bool = False, series_names=(),
+              default_series: str | None = None) -> tuple[str, list[Slot]]:
+    """``(text with slot ids, slots)`` of one source.
+
+    ``bank`` owns its value and tenor/period slots, or with ``banks_from_text`` each value
+    belongs to the bank the text writes next to it; ``series_names`` are the series this
+    source may name (a value's series = the last one written before it, else
+    ``default_series``); ``turkish`` keeps the source's own number text and unit."""
     t = normalise(text or "")
     spans = _spans(t, names)
     masked = list(t)
     for s, e, _, _ in spans:
         masked[s:e] = " " * (e - s)
     masked = "".join(masked)
-    items = [(s, e, kind, disp, 0, None) for s, e, kind, disp in spans]
+    series_hits = _series_mentions(t, series_names)
+
+    def series_at(pos):
+        before = [k for s, e, k in series_hits if e <= pos]
+        return before[-1] if before else series_key(default_series)
+    items = []
+    for s, e, role, disp in spans:
+        own = bank if role in ("tenor", "period") else None
+        items.append((s, e, "value" if role == "band" else "label", disp, 0, own, role,
+                      series_at(s) if role == "band" else None))
     values = read_values(masked)
     owners = _owners_in(masked, values) if banks_from_text else [bank] * len(values)
     for (n, unit, sign), own in zip(values, owners):
@@ -630,19 +734,19 @@ def slots_for(source_id: str, text: str, names=(), bank: str | None = None,
         if sign_m:
             s = min(s, n.start - len(before) + sign_m.start(1))
             disp = ("−" if sign_m.group(1) in "−-" else "+") + disp.lstrip("+-−")
-        kind = "count" if _COUNT_AFTER.match(masked[n.end:n.end + 12]) else "value"
-        items.append((s, e, kind, disp, (-1 if sign_m and sign_m.group(1) in "−-" else
-                                         +1 if sign_m else sign), own))
+        count = bool(_COUNT_AFTER.match(masked[n.end:n.end + 12]))
+        role = "count" if count else "pctl" if _PCTL_AFTER.match(t[e:e + 14]) else "level"
+        items.append((s, e, "count" if count else "value", disp,
+                      (-1 if sign_m and sign_m.group(1) in "−-" else +1 if sign_m else sign),
+                      own, role, None if count else series_at(s)))
     items.sort()
     out, slots, pos, k = [], [], 0, {"value": 0, "label": 0, "count": 0}
-    for s, e, kind, disp, sgn, own in items:
+    for s, e, kind, disp, sgn, own, role, series in items:
         if s < pos:
             continue
-        group = kind if kind in ("value", "count") else "label"
-        k[group] += 1
-        sid = "%s.%s%d" % (source_id, {"value": "n", "count": "c", "label": "l"}[group], k[group])
-        slots.append(Slot(sid, source_id, disp.strip(), group,
-                          own if group == "value" else None, sgn))
+        k[kind] += 1
+        sid = "%s.%s%d" % (source_id, {"value": "n", "count": "c", "label": "l"}[kind], k[kind])
+        slots.append(Slot(sid, source_id, disp.strip(), kind, own, sgn, role, series))
         out.append(t[pos:s] + "{%s}" % sid)
         pos = e
     out.append(t[pos:])
@@ -651,131 +755,185 @@ def slots_for(source_id: str, text: str, names=(), bank: str | None = None,
 
 def count_slot(source_id: str, name: str, value: int) -> Slot:
     """A code-made count (a count line's bank count): ``{K1.c1}`` = "2"."""
-    return Slot("%s.%s" % (source_id, name), source_id, str(int(value)), "count")
+    return Slot("%s.%s" % (source_id, name), source_id, str(int(value)), "count", role="count")
 
 
 def slot_table(slots) -> str:
-    """The prompt's slot table: ``{R3.n1} = %36 (JPMorgan)``."""
+    """The prompt's slot table: ``{R3.n1} = %36 (JPMorgan, usd/try)``."""
     def note(s):
         bits = [s.bank] if s.bank else []
-        if s.topic_label:
-            bits.append("konu: %s" % s.topic_label)
+        if s.series:
+            bits.append(s.series)
+        if s.role == "pctl":
+            bits.append("yüzdelik: '... yüzdeliğinde' diye yaz")
         if s.sign:
             bits.append("düşüş/indirim yönünde" if s.sign < 0 else "artış yönünde")
         return " (%s)" % ", ".join(bits) if bits else ""
     return "\n".join("{%s} = %s%s" % (s.id, s.display, note(s)) for s in slots)
 
 
-# ───────────────────────────────────────────── the gate
+# ───────────────────────────────────────────── gate 1: the model's raw text
 def _plain(text: str) -> str:
     return _NS_CITE.sub(" ", SLOT.sub(" ", text or ""))
 
 
-def _tr_lower(text: str) -> str:
-    return (text or "").replace("İ", "i").replace("I", "ı").lower()
+#: treasury-news PR #3 review: suffixed number words too ("ikincisi", "yarısını", "üçünü",
+#: "çeyreği"), every ordinal ("birinci...", any ending), English number words; common words
+#: that only LOOK like a stem + suffix are kept.
+_CASE = ("n", "in", "ın", "un", "ün", "nin", "nın", "nun", "nün", "ni", "nı", "nu", "nü", "e", "a",
+         "ye", "ya", "ne", "na", "de", "da", "nde", "nda", "den", "dan", "nden", "ndan", "ten", "tan",
+         "le", "la", "yle", "yla", "ler", "lar", "si", "sı", "su", "sü", "sin", "sın", "sun", "sün")
+_NUMWORD_CHAIN = re.compile(r"^(?:%s)+(?:%s)(?:%s){0,2}$" % (
+    "|".join(sorted(NUMBER_STEMS, key=len, reverse=True)),
+    "|".join(sorted([x for x in NUMBER_SUFFIXES if x], key=len, reverse=True)),
+    "|".join(sorted(_CASE, key=len, reverse=True))))
+_ORDINAL = re.compile(r"^(?:bir|%s)+(?:inci|ıncı|uncu|üncü|nci|ncı|ncu|ncü)\w*$"
+                      % "|".join(sorted(NUMBER_STEMS + ("dörd",), key=len, reverse=True)))
+NUMBER_PREFIXES = ("çeyre", "yarım", "yarıs", "yarıy", "buçu", "düzine")
+NUMBER_TOKENS_EN = ("halves", "quarters", "double", "twice", "triple", "dozens", "thousand",
+                    "million", "billion", "trillion", "first", "second", "third", "fourth", "fifth",
+                    "sixth", "seventh", "eighth", "ninth", "tenth", "hundredth", "pct")
+NOT_NUMBERS = ("altında", "altına", "altından", "altındaki", "ona", "onu", "onun", "onlar", "onları",
+               "onların", "onlara", "onda", "ondan", "yüzü", "yüzünden", "bine", "ikide")
+_ROMAN_FULL = re.compile(r"(?<!\w)(?=[MDCLXVI])M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})(?!\w)")
 
 
 def raw_numbers(text: str) -> list[str]:
-    """Numbers the model wrote itself (outside slot ids and citations): digits, any other
-    Unicode number character (superscripts, fractions, other scripts, Roman numeral signs),
-    number words incl. ordinals / fractions ("ikinci", "üçte", "çeyrek", "yarım", "first"),
-    and Roman numerals ("III")."""
-    raw = _plain(text)
-    plain = _tr_lower(raw)
-    found = re.findall(r"\d+(?:[.,]\d+)*", plain)
-    found += [ch for ch in raw if not ch.isdigit() and unicodedata.numeric(ch, None) is not None]
-    found += [ch for ch in raw if ch.isdigit() and not ch.isascii() and not re.match(r"\d", ch)]
-    for w in re.findall(r"[^\W\d_]+", plain):
-        if (w in NUMBER_WORDS or w in NUMBER_WORDS_EXTRA or _NUM_SUFFIXED.match(w)
-                or w.startswith(NUMBER_PREFIXES) or w.startswith("yüzde")):
+    """Digits, numerals and number words the model wrote itself (outside slot ids/citations)."""
+    plain = _plain(text)
+    found = [ch for ch in plain if ch.isdigit() or ch.isnumeric()]
+    found += _ROMAN.findall(plain)
+    found += [m.group(0) for m in _ROMAN_FULL.finditer(plain) if len(m.group(0)) >= 1
+              and m.group(0) not in found and m.group(0) not in ("I",)]
+    for w in re.findall(r"[^\W\d_]+", _tr_lower(plain)):
+        if w in NOT_NUMBERS:
+            continue
+        if (w in NUMBER_TOKENS or w in NUMBER_TOKENS_EN or _NUMWORD.match(w) or _NUMWORD_CHAIN.match(w)
+                or _ORDINAL.match(w) or w.startswith(NUMBER_PREFIXES)):
             found.append(w)
-    found += [m.group(0) for m in _ROMAN.finditer(raw) if m.group(0)]
     return found
 
 
-#: Units, signs and scale words the slot already renders (PR #3 review): never written next
-#: to a slot by the model - "{R1.n1} baz puan", "%{R1.n1}", "eksi {R1.n1}", "{R1.n1} kat".
-UNIT_CHARS = "%‰$€£₺¥+-−–—±×/"
-UNIT_WORDS = ("baz", "bp", "bps", "bin", "mn", "bn", "tn", "tl", "x", "percent", "pct", "percentage",
-              "point", "points", "basis", "euro", "sent", "kat", "katı", "katına", "katını",
-              "katında", "katlık", "katlı", "misli", "eksi", "artı", "minus", "plus", "negatif",
-              "pozitif")
+def stray_braces(text: str) -> list[str]:
+    """A brace that is not part of a valid slot id ("{{R4.n1}}", "{hedef}", "{R4.n1")."""
+    rest = SLOT.sub("", text or "")
+    return [ch for ch in rest if ch in "{}｛｝"]
+
+
+def negations(text: str) -> list[str]:
+    return _NEGATION.findall(_tr_lower(_plain(text)))
+
+
+#: treasury-news: more unit / scale / currency words that the slot renders itself.
 UNIT_PREFIXES = ("puan", "yüzde", "milyon", "milyar", "trilyon", "lira", "dolar", "avro", "kuruş",
-                 "binde", "mislin")
-_SUFFIX = re.compile(r"^'[^\W\d_]+")
+                 "binde", "mislin", "katın", "katl")
+UNIT_WORDS_MORE = ("bin", "mn", "bn", "tn", "tl", "x", "percentage", "point", "points", "basis",
+                   "euro", "sent", "misli", "negatif", "pozitif", "katını", "katında")
 
 
-def _unit_word(word: str) -> bool:
-    w = _tr_lower(word)
-    return w in UNIT_WORDS or w.startswith(UNIT_PREFIXES)
+def _unit_word(w: str) -> bool:
+    return w in UNIT_WORDS or w in UNIT_WORDS_MORE or w.startswith(UNIT_PREFIXES)
 
 
-def adjacent_problems(sentence: str) -> list[str]:
-    """A unit, sign, scale word or another slot written right next to a slot."""
-    text = _NS_CITE.sub(lambda m: " " * len(m.group(0)), sentence or "")
-    slots = list(SLOT.finditer(text))
+def _adjacent(text: str, used, slots) -> list[str]:
+    """Nothing glued to a slot: the slot renders value + unit (+ sign) itself."""
     problems = []
-    for k, m in enumerate(slots):
-        sid = "{%s.%s}" % m.groups()
-        after = text[m.end():]
-        suffix = _SUFFIX.match(after)
-        after = after[suffix.end():] if suffix else after
-        before = text[:m.start()]
-        if k + 1 < len(slots) and not re.search(r"[^\W\d_]", text[m.end():slots[k + 1].start()]):
-            problems.append("iki yuva yan yana: %s ve {%s.%s} — arasına söz yaz ('ile', 've')"
-                            % (sid, *slots[k + 1].groups()))
-        nxt, prv = after.lstrip(), before.rstrip()
-        if (nxt[:1] and nxt[0] in UNIT_CHARS) or (prv[-1:] and prv[-1] in UNIT_CHARS):
-            problems.append("yuvanın yanında birim ya da işaret var: %s — birimi yuva kendisi yazar" % sid)
-            continue
-        w_after = re.match(r"[^\W\d_]+", nxt)
-        w_before = re.search(r"([^\W\d_]+)\W*$", prv)
-        if (w_after and _unit_word(w_after.group(0))) or (
-                w_before and before[w_before.end(1):].strip() == "" and _unit_word(w_before.group(1))):
-            problems.append("yuvanın yanında birim sözcüğü var: %s — birimi yuva kendisi yazar" % sid)
+    for idx, (s, e, sid) in enumerate(used):
+        before, after = text[:s], text[e:]
+        prev_ch = before[-1:] if before else ""
+        next_ch = after[:1]
+        if prev_ch and not (prev_ch.isspace() or prev_ch in "(\"“'"):
+            same_range = (prev_ch in "–-" and idx > 0 and used[idx - 1][1] == s - 1
+                          and sid in slots and used[idx - 1][2] in slots
+                          and slots[used[idx - 1][2]].source == slots[sid].source)
+            if not same_range:                         # "{a}–{b}": a range of one source only
+                problems.append("yuvanın önüne yapışık işaret: '%s{%s}'" % (prev_ch, sid))
+        if next_ch and not (next_ch.isspace() or next_ch in ".,;:)!?'’\"”"):
+            if not (next_ch in "–-" and idx + 1 < len(used) and used[idx + 1][0] == e + 1):
+                problems.append("yuvanın ardına yapışık metin: '{%s}%s'" % (sid, after[:4]))
+        nxt = re.match(r"(?:'[^\W\d_]+)?[,;/]?\s+(\S+)", after)
+        if nxt:
+            w = _tr_lower(nxt.group(1)).strip(".,;:!?()\"'")
+            if _unit_word(w) or SLOT.match(nxt.group(1)) or _NUMWORD.match(w) or w in NUMBER_TOKENS:
+                problems.append("yuvanın yanında birim/sayı sözcüğü ya da ikinci yuva: '{%s} %s'" % (sid, w))
+        prv = re.search(r"(\S+)\s+$", before)
+        if prv:
+            w = _tr_lower(prv.group(1)).strip(".,;:!?()\"'")
+            if _unit_word(w) or _NUMWORD.match(w) or w in NUMBER_TOKENS:
+                problems.append("yuvanın önünde birim/sayı sözcüğü: '%s {%s}'" % (w, sid))
     return problems
 
 
-def check_slots(sentence: str, slots: dict, cited: set, owners: set, require_bank: bool = False) -> list[str]:
+def check_slots(sentence: str, slots: dict, cited: set, owners: set, require_bank: bool = False,
+          series_names=()) -> list[str]:
     """Problems of one model sentence (Turkish, empty = passes). ``slots`` id -> Slot of the
     whole spec; ``cited`` the source ids the sentence cites (count lines with their reports);
     ``owners`` the canonical banks of the cited sources; ``require_bank``: a bank's value
-    must always have its bank named next to it (slide 1: per-bank numbers keep their bank)."""
+    must always have its bank named next to it (slide 1); ``series_names`` every series name
+    the sources use (a slot under another series' name is refused)."""
     problems = ["kendi yazdığın sayı: %s — yalnız {…} yuvalarını kullan" % x for x in raw_numbers(sentence)]
-    problems += adjacent_problems(sentence)
+    problems += ["yuva dışında süslü parantez: %s" % x for x in stray_braces(sentence)]
+    problems += ["olumsuz fiil (kaynağın iddiasını tersine çevirir): %s" % x for x in negations(sentence)]
     used = [(m.start(), m.end(), "%s.%s" % (m.group(1), m.group(2))) for m in SLOT.finditer(sentence)]
     for _, _, sid in used:
         if sid not in slots:
             problems.append("bilinmeyen yuva: {%s}" % sid)
         elif slots[sid].source not in cited:
             problems.append("yuvanın kaynağına atıf yok: {%s} (%s)" % (sid, slots[sid].source))
+    problems += _adjacent(sentence, used, slots)
+    used = [u for u in used if u[2] in slots]
     text = SLOT.sub(lambda m: "#" * len(m.group(0)), _NS_CITE.sub(lambda m: " " * len(m.group(0)), sentence))
     mentions = bank_mentions(text)
     for b in dict.fromkeys(b for _, _, b in mentions):
         if b not in owners:
             problems.append("atıf yapılmayan kurum adı geçiyor: %s" % b)
-    values = [(s, e, sid) for s, e, sid in used if sid in slots and slots[sid].kind == "value"]
-    subjects = [_subject(text, mentions, s) for s, _, _ in values]
+    owned = [(s, e, sid) for s, e, sid in used if slots[sid].bank]
+    subjects = [_subject(text, mentions, s) for s, _, _ in owned]
     owner = [list(x) for x in subjects]
     i = 0
-    while i < len(values):
+    while i < len(owned):
         j = i
-        while j + 1 < len(values) and subjects[j + 1] == subjects[i] and re.match(
-                r"^(?:'\w+)?\s*(?:,|ve|ile|and|&)\s*$", text[values[j][1]:values[j + 1][0]], re.I):
+        while j + 1 < len(owned) and subjects[j + 1] == subjects[i] and re.match(
+                r"^(?:'\w+)?\s*(?:,|ve|ile|and|&)\s*$", text[owned[j][1]:owned[j + 1][0]], re.I):
             j += 1
         if len(subjects[i]) > 1 and j - i + 1 == len(subjects[i]):
             for k in range(len(subjects[i])):
                 owner[i + k] = [subjects[i][k]]
         i = j + 1
-    for (s, e, sid), own in zip(values, owner):
+    for (s, e, sid), own in zip(owned, owner):
         slot = slots[sid]
-        if slot.bank and own and slot.bank not in own:
-            problems.append("{%s} %s'ın sayısı; cümlede %s'ın yanında" % (sid, slot.bank, ", ".join(own)))
-        if slot.bank and not own and (require_bank or len(owners) > 1):
+        if own and slot.bank not in own:
+            problems.append("{%s} %s'ın; cümlede %s'ın yanında" % (sid, slot.bank, ", ".join(own)))
+        if not own and slot.kind == "value" and (require_bank or len(owners) > 1):
             problems.append("{%s} hangi kurumun olduğu yazılmamış (%s)" % (sid, slot.bank))
+    series_hits = _series_mentions(text, series_names)
+    low = _tr_lower(text)
+    for s, e, sid in used:
+        slot = slots[sid]
+        if slot.kind == "value" and slot.series:
+            before = [k for hs, he, k in series_hits if he <= s]
+            if before and before[-1] != slot.series:
+                problems.append("{%s} %s serisinin değeri; cümlede %s altında" % (sid, slot.series, before[-1]))
+        if slot.kind == "label" and slot.role in ("date", "year", "period", "tenor"):
+            prv = re.search(r"(\S+)\s+$", low[:s])
+            if prv and prv.group(1).strip(".,;:") in LEVEL_WORDS:
+                problems.append("{%s} bir etiket (%s); değer yerine kullanılmış" % (sid, slot.role))
+        if slot.role == "pctl" and not _PCTL_AFTER.match(low[e:e + 14]):
+            problems.append("{%s} bir yüzdelik; '{%s} yüzdeliğinde' diye yazılmalı" % (sid, sid))
+        if slot.kind == "label" and slot.role in ("date", "year", "period", "tenor"):
+            nxt_w = re.match(r"(?:'[^\W\d_]+)?\s*([^\W\d_]+)", low[e:])
+            if nxt_w and nxt_w.group(1).startswith(VALUE_AFTER):
+                problems.append("{%s} bir etiket (%s); değer yerine kullanılmış ('%s')" % (
+                    sid, slot.role, nxt_w.group(1)))
+            for s2, e2, sid2 in used:            # "{label} ile {value}": a label in a value range
+                if sid2 != sid and slots[sid2].kind == "value" and re.fullmatch(
+                        r"\s*(?:ile|ve|–|-|,)\s*", low[min(e, e2):max(s, s2)]):
+                    problems.append("{%s} bir etiket; {%s} değeriyle aralık kurulmuş" % (sid, sid2))
         if slot.sign:
-            near = re.findall(r"[^\W\d_]+", _tr_lower(text[e:e + 40]))[:3] + \
-                re.findall(r"[^\W\d_]+", _tr_lower(text[max(0, s - 30):s]))[-2:]
+            # PR #3 review: the whole stretch up to the neighbouring slots, not 2-3 words
+            prev_end = max([e2 for s2, e2, _ in used if e2 <= s] or [0])
+            next_start = min([s2 for s2, e2, _ in used if s2 >= e] or [len(low)])
+            near = re.findall(r"[^\W\d_]+", low[prev_end:s]) + re.findall(r"[^\W\d_]+", low[e:next_start])
             down = any(w.startswith(DOWN_WORDS) for w in near)
             up = any(w.startswith(UP_WORDS) for w in near)
             if (slot.sign < 0 and up and not down) or (slot.sign > 0 and down and not up):
@@ -783,10 +941,85 @@ def check_slots(sentence: str, slots: dict, cited: set, owners: set, require_ban
     return problems
 
 
+def check_headline(headline: str) -> list[str]:
+    """The headline cites nothing: no slot, number, brace, bank name or negation."""
+    problems = []
+    if SLOT.search(headline or "") or raw_numbers(headline):
+        problems.append("başlıkta sayı var")
+    if stray_braces(headline):
+        problems.append("başlıkta süslü parantez")
+    for b in dict.fromkeys(b for _, _, b in bank_mentions(headline or "")):
+        problems.append("başlıkta kurum adı (atıfsız iddia): %s" % b)
+    problems += ["başlıkta olumsuz fiil: %s" % x for x in negations(headline)]
+    return problems
+
+
+# ───────────────────────────────────────────── fill + gate 2: read the final sentence again
+def fill_spans(text: str, slots: dict) -> tuple[str, list[tuple[int, int, str]]]:
+    """``(filled text, [(start, end, slot id)])`` - where each display landed."""
+    out, spans, pos, length = [], [], 0, 0
+    for m in SLOT.finditer(text or ""):
+        sid = "%s.%s" % m.groups()
+        chunk = text[pos:m.start()]
+        out.append(chunk)
+        length += len(chunk)
+        disp = slots[sid].display if sid in slots else m.group(0)
+        spans.append((length, length + len(disp), sid))
+        out.append(disp)
+        length += len(disp)
+        pos = m.end()
+    out.append((text or "")[pos:])
+    return "".join(out), spans
+
+
 def fill_slots(text: str, slots: dict) -> str:
     """Slot ids -> the source's displays."""
-    return SLOT.sub(lambda m: slots["%s.%s" % (m.group(1), m.group(2))].display
-                    if "%s.%s" % (m.group(1), m.group(2)) in slots else m.group(0), text or "")
+    return fill_spans(text, slots)[0]
+
+
+def _reading(text: str):
+    """(start, end, value, unit, sign) of every number of a text, labels masked."""
+    masked = list(text)
+    for s, e, _, _ in _spans(text, ()):
+        masked[s:e] = " " * (e - s)
+    masked = "".join(masked)
+    out = []
+    for n, unit, _ in read_values(masked):
+        sign_m = _SIGN_BEFORE.search(masked[max(0, n.start - 4):n.start])
+        out.append((n.start, n.end, round(n.value, 9), unit,
+                    -1 if sign_m and sign_m.group(1) in "−-" else +1 if sign_m else 0))
+    return out
+
+
+def verify_filled(sentence: str, slots: dict) -> list[str]:
+    """The FINAL sentence read again (owner, pass 6): every number lies inside a filled slot
+    and reads with the same value, unit and sign as that slot's own display; no brace left."""
+    filled, spans = fill_spans(sentence, slots)
+    problems = []
+    if stray_braces(filled) or SLOT.search(filled):
+        problems.append("doldurulmuş cümlede süslü parantez kaldı: %s" % filled[:60])
+    starts = {sp[0] for sp in spans}
+    ends = {sp[1] for sp in spans}
+    for s, e, sid in spans:                    # the filled value's borders (%%36, −%36, 15,20lik)
+        prev = filled[s - 1:s]
+        nxt = filled[e:e + 1]
+        if prev and (prev.isalnum() or prev in "%−+" or (prev in "-–" and s - 1 not in ends)):
+            problems.append("{%s} doldurulunca önüne yapışık: '%s'" % (sid, filled[max(0, s - 3):e]))
+        if nxt and (nxt.isalnum() or nxt == "%" or (nxt in "-–" and e + 1 not in starts)):
+            problems.append("{%s} doldurulunca ardına yapışık: '%s'" % (sid, filled[s:e + 4]))
+    for s, e, value, unit, sign in _reading(_NS_CITE.sub(lambda m: " " * len(m.group(0)), filled)):
+        inside = [sp for sp in spans if sp[0] <= s and e <= sp[1]]
+        if not inside:
+            problems.append("doldurulmuş cümlede yuva dışı sayı: %s" % filled[s:e])
+            continue
+        sid = inside[0][2]
+        if sid not in slots or slots[sid].kind == "label":
+            continue
+        own = [(v, u, g) for _, _, v, u, g in _reading(slots[sid].display)]
+        if (value, unit, sign) not in own:
+            problems.append("{%s} cümlede '%s' okunuyor; kaynakta '%s'" % (
+                sid, filled[max(0, s - 2):e + 9].strip(), slots[sid].display))
+    return problems
 
 # ───────────────────────────────────────────── instrument key (treasury-report link_gate)
 _FOLD = str.maketrans("İIıĞğÜüŞşÖöÇç", "IIIGGUUSSOOCC")
@@ -822,7 +1055,7 @@ KEY_POINTS_PER_REPORT = 2
 #: Primary subjects that never enter the summary (treasury-report's rule; treasury-news
 #: summaries carry no ``subjects`` yet, so today this only acts if that field appears).
 DROP_SUBJECTS = ("equity", "non_research")
-PROMPT_VER = "rs-5-tn3"     # rs-5 + PR #3 reviews: slot neighbours, ":"/line breaks, topic, negation
+PROMPT_VER = "rs-6-tn4"     # PRISMA pass 6 + PR #3 reviews (series per slot, labels, names, negation)
 NAME = "Araştırma özeti"
 TEMPLATE_HEADLINE = "Kurumların bugünkü görüşleri"
 
@@ -880,7 +1113,7 @@ SYSTEM = """Sen bir hazine biriminin günlük araştırma bülteninin yazarısı
 
 Kurallar:
 1. Yalnızca verilen olguları kullan. Olgularda olmayan bilgi ya da yorum ekleme.
-2. HİÇBİR RAKAMI ya da sayı sözcüğünü kendin yazma. Olgulardaki her sayı, tarih, vade ve rakamlı ad süslü parantezli bir YUVADIR, örneğin {R3.n1}; sayıya ihtiyacın varsa yuvayı aynen yaz ({R3.n1}), değerini kod yerleştirir. Yuva tablosu her yuvanın değerini ve kurumunu gösterir. Bir yuvayı kullandığın cümle, yuvanın raporuna atıf yapar ({R3.n1} → [R3]). Bir kurumun yuvasını o kurumun adının yanında yaz; iki kurumu "A ve B" diye yazarsan yuvaları da aynı sırayla yaz. Yuvanın yönünü değiştirme (indirim yuvası "artış" olmaz). Bir cümlede en fazla 2 değer yuvası olsun. Bir kurumun adını yalnız o kurumun raporuna atıf yapıyorsan yaz. Yuvanın yanına birim, işaret ya da ölçek YAZMA (%, eksi, artı, "baz puan", "puan", "kat", "milyar", "TL" yasak): yuva değeri birimiyle birlikte kendisi yazar. İki yuvayı yan yana ya da yalnız tire/virgülle yazma; aralık için "{R5.n1} ile {R5.n2} arasında" yaz. "Çeyrek", "yarım", "ikinci", "üçte bir" gibi sayı sözcükleri ve Roma rakamları da yazma. Bir değer yuvasını kullandığın cümlede yuvanın konusunu (yuva tablosundaki "konu") aynen yaz; bir konunun sayısını başka bir konu için yazma. Olgularda geçmeyen kurum adı yazma.
+2. HİÇBİR RAKAMI ya da sayı sözcüğünü kendin yazma. Olgulardaki her sayı, tarih, vade ve rakamlı ad süslü parantezli bir YUVADIR, örneğin {R3.n1}; sayıya ihtiyacın varsa yuvayı aynen yaz ({R3.n1}), değerini kod yerleştirir. Yuva tablosu her yuvanın değerini ve kurumunu gösterir. Bir yuvayı kullandığın cümle, yuvanın raporuna atıf yapar ({R3.n1} → [R3]). Bir kurumun yuvasını o kurumun adının yanında yaz; iki kurumu "A ve B" diye yazarsan yuvaları da aynı sırayla yaz. Yuvanın yönünü değiştirme (indirim yuvası "artış" olmaz). Bir cümlede en fazla 2 değer yuvası olsun. Bir kurumun adını yalnız o kurumun raporuna atıf yapıyorsan yaz. Yuvanın yanına birim, işaret ya da ölçek YAZMA (%, eksi, artı, "baz puan", "puan", "kat", "milyar", "TL" yasak): yuva değeri birimiyle birlikte kendisi yazar. İki yuvayı yan yana ya da yalnız tire/virgülle yazma; aralık için "{R5.n1} ile {R5.n2} arasında" yaz. "Çeyrek", "yarım", "ikinci", "üçte bir" gibi sayı sözcükleri ve Roma rakamları da yazma. Bir değer yuvasını yuva tablosunda yazan serinin (örneğin "policy rate" → politika faizi) değeri olarak yaz; bir serinin sayısını başka bir serinin adının altında yazma. Tarih, yıl, dönem ve vade yuvaları etikettir, değer gibi kullanma ("{R7.l1} seviyesinde" yasak). Olgularda geçmeyen kurum adı yazma. Hiçbir fiili olumsuz yazma ("beklemiyor", "yapmadı", "değil" yasak).
 3. Her cümlenin sonuna dayandığı raporların numaralarını köşeli parantezle yaz, örneğin [R2] ya da [R3][R7][R12]. Atıfsız cümle yazma; bir maddede iki cümle varsa ikisi de atıf taşır. İki nokta (:) ve satır sonu kullanma.
 4. Özet bütün raporları saymak zorunda değildir; günün genel resmini ver. Aynı görüşteki raporları TEK maddede topla ve hepsine atıf yap (örneğin "USD/TRY için yıl sonu beklentisi {R3.n1} ile {R7.n1} arasında [R3][R7]."); ayrışan görüşü ayrı bir maddede, kendi atfıyla yaz.
 4a. [K] olguları bir enstrüman için bir görüşü taşıyan kurumları ve raporlarını söyler; [K] numarası o raporların yerine geçer. Kurum sayısını [K] yuvasıyla yaz ("{K1.c1} kurum").
@@ -1070,6 +1303,7 @@ class Spec:
     banks: dict = field(default_factory=dict)        # "R1" -> "Goldman Sachs"
     fact_banks: dict = field(default_factory=dict)   # "R1"/"K1" -> {canonical banks}
     names: list = field(default_factory=list)        # instrument labels of every report
+    series_names: list = field(default_factory=list)  # series a slot may belong to
     user: str = ""
     label: str = ""
 
@@ -1094,16 +1328,21 @@ def build_spec(reports: list[dict], label: str = "") -> Spec | None:
     spec = Spec(reports=list(reports), label=label)
     lines = ["Gün: %s" % (label or reports[0].get("date") or ""), "Rapor olguları:"]
     spec.names = _instrument_labels(reports)
+    spec.series_names = sorted({str(i).strip() for r in reports
+                                for i in _summary(r).get("instruments") or () if str(i).strip()}
+                               | {x[1] for x in (_instrument(r) for r in reports) if x}
+                               | set(SERIES_ALIASES))
     for i, r in enumerate(reports, 1):
         text = report_fact(r)
         rid = "R%d" % i
         spec.claims[rid] = {"text": text, "numbers": [], "quote": ""}
         spec.banks[rid] = canonical_bank(source_name(r.get("source")))
         spec.fact_banks[rid] = {spec.banks[rid]}
-        slotted, slots = slots_for(rid, text, spec.names, bank=spec.banks[rid])
-        keys, label_ = topics_of(r)
-        spec.slots.update({x.id: (replace(x, topic=keys, topic_label=label_) if x.kind == "value" else x)
-                           for x in slots})
+        main = _instrument(r)          # each NUMBER gets its own series (the last one named before it)
+        slotted, slots = slots_for(rid, text, spec.names, bank=spec.banks[rid],
+                                   series_names=spec.series_names,
+                                   default_series=main[1] if main else None)
+        spec.slots.update({x.id: x for x in slots})
         lines.append("[%s] %s" % (rid, slotted))
     spec.groups = groups(reports)
     if spec.groups:
@@ -1116,9 +1355,7 @@ def build_spec(reports: list[dict], label: str = "") -> Spec | None:
             text = stance_fact(g, stance, banks)
             spec.facts[kid] = {"text": text, "numbers": []}
             spec.fact_banks[kid] = {canonical_bank(b) for b in banks}
-            gkeys = _topic_keys([g["label"]])
-            c1, c2 = (replace(count_slot(kid, "c1", len(banks)), topic=gkeys, topic_label=label_tr(g["label"])),
-                      replace(count_slot(kid, "c2", g["n_banks"]), topic=gkeys, topic_label=label_tr(g["label"])))
+            c1, c2 = count_slot(kid, "c1", len(banks)), count_slot(kid, "c2", g["n_banks"])
             spec.slots.update({c1.id: c1, c2.id: c2})
             slotted = text.replace("(%d kurum)" % len(banks), "({%s} kurum)" % c1.id, 1).replace(
                 "toplam %d kurum" % g["n_banks"], "toplam {%s} kurum" % c2.id, 1)
@@ -1165,12 +1402,9 @@ def validate(out, spec: Spec) -> list[str]:
         errors.append("başlık yok")
     elif len(headline.split()) > HEADLINE_MAX_WORDS:
         errors.append("başlık %d kelimeden uzun" % HEADLINE_MAX_WORDS)
-    elif raw_numbers(headline) or SLOT.search(headline):
-        errors.append("başlıkta sayı var")
-    if headline:                     # the same word / number / bank checks as a bullet (PR #3)
-        errors += ["başlık: %s" % p for p in unknown_banks(headline) + negated_forecasts(headline)]
-        errors += ["başlık: %s" % p for p in check_slots(headline, spec.slots, set(), set())
-                   if not p.startswith("kendi yazdığın sayı")]
+    else:                            # the headline cites nothing: no number, brace, bank, negation
+        errors += check_headline(headline)
+        errors += ["başlık: %s" % p for p in unknown_names(headline, spec)]
         errors += ["başlık: %s" % p for p in check_sentence(mask_digits(headline), {}, {}, limits=False)]
     lo, hi = spec.n_bullets
     if not lo <= len(bullets) <= hi:
@@ -1186,6 +1420,7 @@ def validate(out, spec: Spec) -> list[str]:
         for x in sentences:          # each sentence against ITS OWN cited reports (D16)
             errors += ["%s (%s)" % (p, x[:50]) for p in check_numbers(x, spec)]
             errors += ["%s (%s)" % (p, x[:50]) for p in claim_problems(x, spec)]
+            errors += ["%s (%s)" % (p, x[:50]) for p in verify_filled(x, spec.slots)]
             errors += ["%s (%s)" % (p, x[:50]) for p in check_sentence(
                 mask_digits(SLOT.sub("#", with_members(x, spec))), spec.facts,
                 spec.claims, limits=False)]
@@ -1230,42 +1465,45 @@ def check_numbers(sentence: str, spec: Spec) -> list[str]:
     """``number_slots.check`` against what this sentence cites ([K#] brings its reports)."""
     cited = _cited_ids(sentence, spec)
     owners = set().union(*(spec.fact_banks.get(c, set()) for c in cited)) if cited else set()
-    return check_slots(sentence, spec.slots, cited, owners)
+    return check_slots(sentence, spec.slots, cited, owners, series_names=spec.series_names)
 
 
 
 
-# ───────────────────────────────────────────── PR #3 / PRISMA #176 review: extra claim checks
-#: Banks and research houses that are NOT sources here: named in a summary = refused.
-OTHER_BANKS = ("UBS", "HSBC", "BNP Paribas", "BNP", "Société Générale", "Societe Generale", "SocGen",
-               "Nomura", "BofA", "Bank of America", "Merrill Lynch", "Wells Fargo", "Credit Suisse",
-               "Standard Chartered", "StanChart", "Commerzbank", "ING", "Natixis", "Mizuho", "MUFG",
-               "SMBC", "Santander", "BBVA", "Jefferies", "RBC", "Scotiabank", "TD Securities",
-               "Danske", "SEB", "Nordea", "Rabobank", "ABN AMRO", "Macquarie", "UniCredit",
-               "Intesa", "Crédit Agricole", "Credit Agricole", "Bernstein", "Evercore", "Lazard",
-               "Capital Economics", "Oxford Economics", "Bloomberg Economics", "Moody's", "Fitch",
-               "Örnek Banka")
-#: "<Name> Bank / Bankası / Securities / Capital / Markets / Research" not in BANK_ALIASES
-#: is an unknown source too, except these public institutions.
+# ───────────────────────────────────────────── PR #3 reviews: names, English negation, re-read
+#: Research houses not in BANK_ALIASES (which already lists HSBC, UBS, Nomura, BofA, BNP ...):
+#: named in a summary = refused (none of them owns a cited report).
+OTHER_BANKS = ("MUFG", "SMBC", "BBVA", "Jefferies", "RBC", "Scotiabank", "TD Securities", "Danske",
+               "SEB", "Nordea", "Rabobank", "ABN AMRO", "Macquarie", "UniCredit", "Intesa",
+               "Crédit Agricole", "Credit Agricole", "Bernstein", "Evercore", "Lazard", "Pictet",
+               "Capital Economics", "Oxford Economics", "İş Yatırım", "Örnek Banka")
+#: Public institutions and other proper names a summary may write (lower case, folded words).
 PUBLIC_BANKS = ("merkez bankası", "central bank", "reserve bank", "world bank", "dünya bankası",
                 "yatırım bankası", "kalkınma bankası", "investment bank", "development bank",
                 "bank of england", "bank of japan", "bank of canada", "people's bank")
+PROPER_OK = ("fed", "fomc", "ecb", "amb", "tcmb", "boe", "boj", "boc", "snb", "rba", "rbnz", "pboc",
+             "merkez", "bankası", "avrupa", "euro", "bölgesi", "abd", "türkiye", "türk", "japonya",
+             "çin", "almanya", "ingiltere", "birleşik", "krallık", "hazine", "imf", "opec", "tüfe",
+             "üfe", "gsyh", "brent", "wti", "bist", "eur", "usd", "try", "tl", "jpy", "gbp", "chf",
+             "cny", "bund", "ust", "jgb", "gilt", "hazine", "ocak", "şubat", "mart", "nisan", "mayıs",
+             "haziran", "temmuz", "ağustos", "eylül", "ekim", "kasım", "aralık", "politika", "faizi")
+#: The model's own sentence openers that are ordinary words, not names.
+COMMON_STARTS = ("kurum", "banka", "rapor", "bu", "bun", "ayrıca", "öte", "diğer", "her", "tüm",
+                 "faiz", "kur", "enflasyon", "getiri", "uzlaşı", "ayrışma", "yıl", "kısa", "orta",
+                 "uzun", "vade", "dolar", "euro", "lira", "piyasa", "büyüme", "politika", "mevduat",
+                 "tahvil", "emtia", "petrol", "altın", "hisse", "döviz", "makas", "eğri", "reel",
+                 "işsizlik", "konut", "ise", "buna", "ancak", "aynı", "farklı", "görüş")
 _OTHER_BANKS = [re.compile(r"(?<![\w.])%s(?![\w])" % re.escape(b), 0 if b.isupper() else re.I)
                 for b in OTHER_BANKS]
 _GENERIC_BANK = re.compile(r"\b(?:[A-ZÇĞİÖŞÜ][\w&.'-]*\s+){1,3}(?:Bank|Banka|Bankası|Securities|Capital|"
-                           r"Markets|Research|Partners|Asset Management)\b")
-#: Forecast verbs said in the negative ("beklemiyor", "öngörmüyor", "does not expect"): the
-#: report's view is given positively, a negation reverses it.
-_NEGATED = re.compile(
-    r"\b(?:bekle|beklen|öngör|öngörül|gör|düşün|öner|tahmin\s+et|işaret\s+et|öngörü\s+et)"
-    r"(?:m[ıiuü]yor\w*|me[zs]\w*|ma[zs]\w*|meyecek\w*|mayacak\w*|meyeceğ\w*|mayacağ\w*|"
-    r"memekte\w*|mamakta\w*|medi\w*|madı\w*|memiş\w*|mamış\w*)"
-    r"|\b(?:do|does|did)(?:\s+not|n't)\s+(?:expect|see|forecast|anticipate|project)\w*"
-    r"|\bno\s+longer\s+(?:expect|see|forecast)\w*|\bnot\s+expected\b", re.I)
+                           r"Markets|Research|Partners|Asset Management|Yatırım|Menkul)\b")
+_NEGATED_EN = re.compile(r"\b(?:do|does|did)(?:\s+not|n't)\s+\w+|\bno\s+longer\b|\bnot\s+expected\b"
+                         r"|\bnever\b|\bunlikely\b", re.I)
+_CAPWORD = re.compile(r"[^\s\[\](){}\"“”,;:!?]+")
 
 
 def unknown_banks(text: str) -> list[str]:
-    """Bank / research-house names that are not one of the sources (``BANK_ALIASES``)."""
+    """Bank / research-house names that are not one of the sources."""
     plain = _NS_CITE.sub(" ", SLOT.sub(" ", text or ""))
     found = [m.group(0) for p in _OTHER_BANKS for m in p.finditer(plain)]
     for m in _GENERIC_BANK.finditer(plain):
@@ -1276,86 +1514,86 @@ def unknown_banks(text: str) -> list[str]:
     return ["tanınmayan kurum adı: %s" % n for n in dict.fromkeys(found)]
 
 
-def negated_forecasts(text: str) -> list[str]:
-    """Forecast verbs in the negative (see ``_NEGATED``)."""
-    return ["olumsuz tahmin fiili: %s — raporun görüşünü olumlu fiille aktar" % m.group(0)
-            for m in _NEGATED.finditer(_tr_lower(text or ""))]
+def _known_names(spec: Spec) -> set:
+    """Proper names the facts give the model (folded lower case): every word of the fact
+    lines and the slot table, the Turkish instrument labels, ``PROPER_OK``."""
+    words = set(PROPER_OK)
+    for src in [spec.user] + [label_tr(n) for n in spec.series_names]:
+        words.update(_tr_lower(w) for w in re.findall(r"[^\W\d_]+", src or ""))
+    return words
 
 
-def _topic_keys(labels) -> tuple:
-    keys = []
-    for label in labels:
-        for k in (instrument_key(label), instrument_key(label_tr(label))):
-            if len(k) >= 2 and k not in keys:
-                keys.append(k)
-    return tuple(keys)
-
-
-def topics_of(r: dict) -> tuple[tuple, str | None]:
-    """(instrument keys, display label) of a report's topic: its named instruments, else the
-    headline's "<asset class>, <country>" part."""
-    labels = [str(i).strip() for i in _summary(r).get("instruments") or () if str(i).strip()]
-    inst = _instrument(r)
-    if inst and inst[1] not in labels:
-        labels.append(inst[1])
-    return _topic_keys(labels), (label_tr(labels[0]) if labels else None)
+def unknown_names(text: str, spec: Spec, values_only: bool = False) -> list[str]:
+    """PR #3 review: a bank the alias list does not know ("Pictet", "İş Yatırım", "J. P.
+    Morgan" spelled another way) is caught as an UNKNOWN PROPER NOUN: a capitalised word that
+    is neither a source bank (``bank_mentions``) nor a word of the facts / a public
+    institution. Sentence-initial words are names only when they are not ordinary openers.
+    ``values_only``: only words before the last value slot count (a bullet)."""
+    plain = _NS_CITE.sub(lambda m: " " * len(m.group(0)), text or "")
+    if values_only:
+        last = [m.start() for m in SLOT.finditer(plain) if spec.slots.get("%s.%s" % m.groups())
+                and spec.slots["%s.%s" % m.groups()].kind == "value"]
+        if not last:
+            return []
+        plain = plain[:max(last)]
+    plain = SLOT.sub(lambda m: " " * len(m.group(0)), plain)
+    for s, e, _ in bank_mentions(plain):
+        plain = plain[:s] + " " * (e - s) + plain[e:]
+    known = _known_names(spec)
+    found = []
+    for i, m in enumerate(_CAPWORD.finditer(plain)):
+        tok = m.group(0).split("'")[0].split("’")[0].strip(".-–")
+        if not tok or not tok[0].isupper():
+            continue
+        parts = [_tr_lower(x) for x in re.findall(r"[^\W\d_]+", tok)]
+        if parts and all(x in known for x in parts):
+            continue
+        initial = not plain[:m.start()].strip()
+        if initial and parts and all(x.startswith(COMMON_STARTS) for x in parts):
+            continue
+        found.append(tok)
+    return ["tanınmayan özel ad (kurum olabilir): %s — yalnız olgulardaki kurumları yaz" % x
+            for x in dict.fromkeys(found)]
 
 
 def claim_problems(claim: str, spec: Spec) -> list[str]:
-    """Unknown banks, negated forecast verbs, and every value / count slot bound to its
-    topic: the filled claim names the slot's own instrument (a USD/TRY number is never
-    written as the policy rate)."""
-    problems = unknown_banks(claim) + negated_forecasts(claim)
-    filled_key = instrument_key(fill_slots(claim, spec.slots))
-    for m in SLOT.finditer(claim):
-        slot = spec.slots.get("%s.%s" % m.groups())
-        if slot and slot.kind in ("value", "count") and slot.topic and not any(
-                k in filled_key for k in slot.topic):
-            problems.append("{%s} %s konusunun sayısı; cümlede bu konu yazılmamış" % (
-                slot.id, slot.topic_label or slot.topic[0]))
-    return problems
-
-
-def _values(text: str) -> list[float]:
-    return sorted(round(n.value, 6) for n in numbers(text))
+    """Unknown banks / proper nouns before a value, English negation (Turkish negation is in
+    ``check_slots``)."""
+    return (unknown_banks(claim) + unknown_names(claim, spec, values_only=True)
+            + ["olumsuz ifade: %s" % m.group(0) for m in _NEGATED_EN.finditer(_NS_CITE.sub(" ", claim))])
 
 
 def reread(out: dict, spec: Spec) -> list[str]:
-    """The final re-read (PR #3 / PRISMA #176): fill every claim, then compare its numbers
-    1:1 with the slots it used, and each slot's numbers with the text of the source the
-    slot came from (which the claim cites). Anything else means a number was made, moved
-    or merged between the model's text and the mail."""
+    """The final re-read before publishing: ``verify_filled`` on every claim (each filled
+    number re-read with its slot's own value, unit and sign, nothing glued, no brace), and every
+    value slot's reading found in its OWN cited source - the source read the way the slots
+    were made (``normalise``d: "one month" -> "1 month", "yüzde 35" -> "%35")."""
     problems = []
     for b in out.get("maddeler") or ():
         for claim in split_claims(str(b)):
-            used = [spec.slots.get("%s.%s" % m.groups()) for m in SLOT.finditer(claim)]
-            if any(s is None for s in used):
-                problems.append("bilinmeyen yuva (%s)" % claim[:50])
-                continue
-            filled = fill_slots(claim, spec.slots)
-            expected = sorted(v for s in used for v in _values(s.display))
-            if _values(filled) != expected:
-                problems.append("doldurulan cümlenin sayıları yuvalarla bire bir tutmuyor (%s)" % filled[:60])
+            problems += verify_filled(claim, spec.slots)
             cited = _cited_ids(claim, spec)
-            for s in used:
+            for m in SLOT.finditer(claim):
+                s = spec.slots.get("%s.%s" % m.groups())
+                if s is None:
+                    problems.append("bilinmeyen yuva: {%s.%s}" % m.groups())
+                    continue
+                if s.source not in cited:
+                    problems.append("{%s} kaynağına atıf yok" % s.id)
+                if s.kind != "value" or s.role == "band":
+                    continue
                 source = (spec.claims.get(s.source) or spec.facts.get(s.source) or {}).get("text", "")
-                pool = numbers(source)
-                for n in numbers(s.display):
-                    if s.source not in cited or not any(
-                            abs(p.value - n.value) < 1e-9 or (p.alt is not None and abs(p.alt - n.value) < 1e-9)
-                            for p in pool):
+                pool = {(v, u) for _, _, v, u, _ in _reading(normalise(source))}
+                for _, _, v, u, _ in _reading(s.display):
+                    if (v, u) not in pool:
                         problems.append("{%s} = %s kaynağında yok (%s)" % (s.id, s.display, s.source))
     return problems
 
 
 def split_claims(text: str) -> list[str]:
-    """The claims of a model bullet: its sentences, each also cut at a line break or a colon
-    (PR #3 review: "A: B [R2]" or "A\nB [R2]" would put two claims under one citation)."""
-    out = []
-    for line in re.split(r"[\r\n]+", text or ""):
-        for sentence in split_sentences(line):
-            out += [x.strip() for x in re.split(r":(?![^{]*\})", sentence) if x.strip()]
-    return out
+    """The claims of a model bullet: its sentences, a colon and a line break included
+    (``split_sentences`` with ``colon=True``): each claim needs its own citation."""
+    return split_sentences(text)
 
 
 def expand_claims(text: str, spec: Spec) -> str:
@@ -1366,7 +1604,7 @@ def expand_claims(text: str, spec: Spec) -> str:
 def expand(text: str, spec: Spec) -> str:
     """[K#] → its reports' [R#]s, sentence by sentence (each sentence keeps its OWN citations
     at its end, D16); repeated [R#]s collapse; in report order."""
-    return " ".join(_expand_one(x, spec) for x in split_sentences(text))
+    return " ".join(_expand_one(x, spec) for x in split_sentences(text, colon=False))
 
 
 def _expand_one(text: str, spec: Spec) -> str:
@@ -1376,8 +1614,7 @@ def _expand_one(text: str, spec: Spec) -> str:
             if rid not in ids:
                 ids.append(rid)
     body = re.sub(r"\s*(\[[KR]\d+\])+", "", text).strip()
-    if body.endswith("."):
-        body = body[:-1].rstrip()
+    body = body.rstrip(" .:;")           # a claim cut at ":" / ";" ends as a sentence
     ids.sort(key=lambda x: int(x[1:]))
     return "%s %s." % (body, "".join("[%s]" % i for i in ids)) if ids else body + "."
 
@@ -1444,14 +1681,17 @@ def write(spec: Spec, ask) -> dict:
     system = SYSTEM.replace("{count}", "%d" % lo if lo == hi else "%d ile %d" % (lo, hi)) \
         .replace("{{", "{").replace("}}", "}")             # slot ids in the rules: no str.format
     user = "Örnek girdi:\n%s\n\nÖrnek yanıt:\n%s\n\nGirdi:\n%s" % (EXAMPLE[0], EXAMPLE[1], spec.user)
-    errors, calls, tr_retry, attempt, prompt = [], 0, False, 0, user
+    errors, calls, tr_retry, attempt, prompt, failed = [], 0, False, 0, user, 0
     while attempt < 2:
         attempt += 1
         try:
             reply = ask(system, prompt)
             calls += 1
         except Exception as exc:                                        # noqa: BLE001 — ağ/uç hatası
-            return fallback(NO_MODEL, calls, ["model çağrısı başarısız: %s" % str(exc)[:200]])
+            # a failed call uses up this attempt only; the second still runs (PRISMA pass 6)
+            failed += 1
+            errors = ["model çağrısı başarısız: %s" % str(exc)[:200]]
+            continue
         try:
             out = _parse(reply)
             errors = validate(out, spec)
@@ -1460,17 +1700,20 @@ def write(spec: Spec, ask) -> dict:
         if not errors:
             errors = reread(out, spec)       # last look at the FILLED text before it is published
         if not errors:
-            return {"headline": out["baslik"].strip(),
-                    "bullets": [expand_claims(fill_slots(b.strip(), spec.slots), spec)
-                                for b in out["maddeler"] if b.strip()],
-                    "status": VERIFIED, "attempts": calls, "errors": []}
+            res = {"headline": out["baslik"].strip(),
+                   "bullets": [expand_claims(fill_slots(b.strip(), spec.slots), spec)
+                               for b in out["maddeler"] if b.strip()],
+                   "status": VERIFIED, "attempts": calls, "errors": []}
+            if not any(ch in "{}｛｝" for ch in res["headline"] + "".join(res["bullets"])):
+                return res
+            errors = ["yayımlanacak metinde süslü parantez kaldı"]     # never published
         if errors[0].startswith("metinde hiç Türkçe") and not tr_retry:
             tr_retry, attempt, prompt = True, attempt - 1, user
             continue
         prompt = "%s\n\nÖnceki yanıtın:\n%s\n\n%s" % (
             user, reply if isinstance(reply, str) else json.dumps(reply, ensure_ascii=False),
             RETRY % "; ".join(errors[:5]))
-    return fallback(TEMPLATE, calls, errors)
+    return fallback(NO_MODEL if failed == attempt else TEMPLATE, calls, errors)
 
 
 def summarize(reports: list[dict], ask, label: str = "") -> dict | None:
