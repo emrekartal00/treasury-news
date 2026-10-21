@@ -43,7 +43,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 # ##########################################################################################
@@ -516,6 +516,8 @@ class Slot:
     kind: str            # "value" | "label" | "count"
     bank: str | None = None
     sign: int = 0        # -1 down / +1 up / 0 unknown (values)
+    topic: tuple = ()    # instrument keys of its source (``instrument_key``): the claim names one
+    topic_label: str | None = None
 
 
 # ───────────────────────────────────────────── formatting (code, Turkish)
@@ -656,6 +658,8 @@ def slot_table(slots) -> str:
     """The prompt's slot table: ``{R3.n1} = %36 (JPMorgan)``."""
     def note(s):
         bits = [s.bank] if s.bank else []
+        if s.topic_label:
+            bits.append("konu: %s" % s.topic_label)
         if s.sign:
             bits.append("düşüş/indirim yönünde" if s.sign < 0 else "artış yönünde")
         return " (%s)" % ", ".join(bits) if bits else ""
@@ -818,7 +822,7 @@ KEY_POINTS_PER_REPORT = 2
 #: Primary subjects that never enter the summary (treasury-report's rule; treasury-news
 #: summaries carry no ``subjects`` yet, so today this only acts if that field appears).
 DROP_SUBJECTS = ("equity", "non_research")
-PROMPT_VER = "rs-5-tn2"     # rs-5 + PR #3 review: no units/signs at slots, no ":" / line breaks
+PROMPT_VER = "rs-5-tn3"     # rs-5 + PR #3 reviews: slot neighbours, ":"/line breaks, topic, negation
 NAME = "Araştırma özeti"
 TEMPLATE_HEADLINE = "Kurumların bugünkü görüşleri"
 
@@ -876,11 +880,11 @@ SYSTEM = """Sen bir hazine biriminin günlük araştırma bülteninin yazarısı
 
 Kurallar:
 1. Yalnızca verilen olguları kullan. Olgularda olmayan bilgi ya da yorum ekleme.
-2. HİÇBİR RAKAMI ya da sayı sözcüğünü kendin yazma. Olgulardaki her sayı, tarih, vade ve rakamlı ad süslü parantezli bir YUVADIR, örneğin {R3.n1}; sayıya ihtiyacın varsa yuvayı aynen yaz ({R3.n1}), değerini kod yerleştirir. Yuva tablosu her yuvanın değerini ve kurumunu gösterir. Bir yuvayı kullandığın cümle, yuvanın raporuna atıf yapar ({R3.n1} → [R3]). Bir kurumun yuvasını o kurumun adının yanında yaz; iki kurumu "A ve B" diye yazarsan yuvaları da aynı sırayla yaz. Yuvanın yönünü değiştirme (indirim yuvası "artış" olmaz). Bir cümlede en fazla 2 değer yuvası olsun. Bir kurumun adını yalnız o kurumun raporuna atıf yapıyorsan yaz. Yuvanın yanına birim, işaret ya da ölçek YAZMA (%, eksi, artı, "baz puan", "puan", "kat", "milyar", "TL" yasak): yuva değeri birimiyle birlikte kendisi yazar. İki yuvayı yan yana ya da yalnız tire/virgülle yazma; aralık için "{R5.n1} ile {R5.n2} arasında" yaz. "Çeyrek", "yarım", "ikinci", "üçte bir" gibi sayı sözcükleri ve Roma rakamları da yazma.
+2. HİÇBİR RAKAMI ya da sayı sözcüğünü kendin yazma. Olgulardaki her sayı, tarih, vade ve rakamlı ad süslü parantezli bir YUVADIR, örneğin {R3.n1}; sayıya ihtiyacın varsa yuvayı aynen yaz ({R3.n1}), değerini kod yerleştirir. Yuva tablosu her yuvanın değerini ve kurumunu gösterir. Bir yuvayı kullandığın cümle, yuvanın raporuna atıf yapar ({R3.n1} → [R3]). Bir kurumun yuvasını o kurumun adının yanında yaz; iki kurumu "A ve B" diye yazarsan yuvaları da aynı sırayla yaz. Yuvanın yönünü değiştirme (indirim yuvası "artış" olmaz). Bir cümlede en fazla 2 değer yuvası olsun. Bir kurumun adını yalnız o kurumun raporuna atıf yapıyorsan yaz. Yuvanın yanına birim, işaret ya da ölçek YAZMA (%, eksi, artı, "baz puan", "puan", "kat", "milyar", "TL" yasak): yuva değeri birimiyle birlikte kendisi yazar. İki yuvayı yan yana ya da yalnız tire/virgülle yazma; aralık için "{R5.n1} ile {R5.n2} arasında" yaz. "Çeyrek", "yarım", "ikinci", "üçte bir" gibi sayı sözcükleri ve Roma rakamları da yazma. Bir değer yuvasını kullandığın cümlede yuvanın konusunu (yuva tablosundaki "konu") aynen yaz; bir konunun sayısını başka bir konu için yazma. Olgularda geçmeyen kurum adı yazma.
 3. Her cümlenin sonuna dayandığı raporların numaralarını köşeli parantezle yaz, örneğin [R2] ya da [R3][R7][R12]. Atıfsız cümle yazma; bir maddede iki cümle varsa ikisi de atıf taşır. İki nokta (:) ve satır sonu kullanma.
 4. Özet bütün raporları saymak zorunda değildir; günün genel resmini ver. Aynı görüşteki raporları TEK maddede topla ve hepsine atıf yap (örneğin "USD/TRY için yıl sonu beklentisi {R3.n1} ile {R7.n1} arasında [R3][R7]."); ayrışan görüşü ayrı bir maddede, kendi atfıyla yaz.
 4a. [K] olguları bir enstrüman için bir görüşü taşıyan kurumları ve raporlarını söyler; [K] numarası o raporların yerine geçer. Kurum sayısını [K] yuvasıyla yaz ("{K1.c1} kurum").
-5. Bir kurumun görüşünü kurumun adıyla ve kurumun fiiliyle yaz ("öngörüyor", "bekliyor", "öneriyor"); görüşü kendi ağzından yazma, "piyasa bekliyor" diye genelleme.
+5. Bir kurumun görüşünü kurumun adıyla ve kurumun fiiliyle yaz ("öngörüyor", "bekliyor", "öneriyor"); görüşü kendi ağzından yazma, "piyasa bekliyor" diye genelleme. Tahmin fiilini olumsuz yazma ("beklemiyor", "öngörmüyor" yasak); raporun görüşünü olumlu fiille aktar.
 6. Neden-sonuç kurma ("çünkü", "nedeniyle", "sayesinde" yasak). Yatırım tavsiyesi verme; "fırsat", "cazip", "alınmalı" gibi sözler yazma. "Rekor", "ilk kez", "en yüksek" yazma.
 7. {count} madde yaz. Önemli olanı önce yaz: önce birden çok kurumun yazdığı konular, uzlaşı ve ayrışma. Her madde tek fikirli, en fazla 25 kelimelik bir cümledir. Aynı konuyu iki maddede tekrarlama.
 8. Başlık en fazla 8 kelime olsun, hiçbir sayı ve kurum adı içermesin ve günün ana mesajını yansıtsın.
@@ -1097,7 +1101,9 @@ def build_spec(reports: list[dict], label: str = "") -> Spec | None:
         spec.banks[rid] = canonical_bank(source_name(r.get("source")))
         spec.fact_banks[rid] = {spec.banks[rid]}
         slotted, slots = slots_for(rid, text, spec.names, bank=spec.banks[rid])
-        spec.slots.update({x.id: x for x in slots})
+        keys, label_ = topics_of(r)
+        spec.slots.update({x.id: (replace(x, topic=keys, topic_label=label_) if x.kind == "value" else x)
+                           for x in slots})
         lines.append("[%s] %s" % (rid, slotted))
     spec.groups = groups(reports)
     if spec.groups:
@@ -1110,7 +1116,9 @@ def build_spec(reports: list[dict], label: str = "") -> Spec | None:
             text = stance_fact(g, stance, banks)
             spec.facts[kid] = {"text": text, "numbers": []}
             spec.fact_banks[kid] = {canonical_bank(b) for b in banks}
-            c1, c2 = count_slot(kid, "c1", len(banks)), count_slot(kid, "c2", g["n_banks"])
+            gkeys = _topic_keys([g["label"]])
+            c1, c2 = (replace(count_slot(kid, "c1", len(banks)), topic=gkeys, topic_label=label_tr(g["label"])),
+                      replace(count_slot(kid, "c2", g["n_banks"]), topic=gkeys, topic_label=label_tr(g["label"])))
             spec.slots.update({c1.id: c1, c2.id: c2})
             slotted = text.replace("(%d kurum)" % len(banks), "({%s} kurum)" % c1.id, 1).replace(
                 "toplam %d kurum" % g["n_banks"], "toplam {%s} kurum" % c2.id, 1)
@@ -1160,6 +1168,7 @@ def validate(out, spec: Spec) -> list[str]:
     elif raw_numbers(headline) or SLOT.search(headline):
         errors.append("başlıkta sayı var")
     if headline:                     # the same word / number / bank checks as a bullet (PR #3)
+        errors += ["başlık: %s" % p for p in unknown_banks(headline) + negated_forecasts(headline)]
         errors += ["başlık: %s" % p for p in check_slots(headline, spec.slots, set(), set())
                    if not p.startswith("kendi yazdığın sayı")]
         errors += ["başlık: %s" % p for p in check_sentence(mask_digits(headline), {}, {}, limits=False)]
@@ -1176,6 +1185,7 @@ def validate(out, spec: Spec) -> list[str]:
             continue
         for x in sentences:          # each sentence against ITS OWN cited reports (D16)
             errors += ["%s (%s)" % (p, x[:50]) for p in check_numbers(x, spec)]
+            errors += ["%s (%s)" % (p, x[:50]) for p in claim_problems(x, spec)]
             errors += ["%s (%s)" % (p, x[:50]) for p in check_sentence(
                 mask_digits(SLOT.sub("#", with_members(x, spec))), spec.facts,
                 spec.claims, limits=False)]
@@ -1223,6 +1233,119 @@ def check_numbers(sentence: str, spec: Spec) -> list[str]:
     return check_slots(sentence, spec.slots, cited, owners)
 
 
+
+
+# ───────────────────────────────────────────── PR #3 / PRISMA #176 review: extra claim checks
+#: Banks and research houses that are NOT sources here: named in a summary = refused.
+OTHER_BANKS = ("UBS", "HSBC", "BNP Paribas", "BNP", "Société Générale", "Societe Generale", "SocGen",
+               "Nomura", "BofA", "Bank of America", "Merrill Lynch", "Wells Fargo", "Credit Suisse",
+               "Standard Chartered", "StanChart", "Commerzbank", "ING", "Natixis", "Mizuho", "MUFG",
+               "SMBC", "Santander", "BBVA", "Jefferies", "RBC", "Scotiabank", "TD Securities",
+               "Danske", "SEB", "Nordea", "Rabobank", "ABN AMRO", "Macquarie", "UniCredit",
+               "Intesa", "Crédit Agricole", "Credit Agricole", "Bernstein", "Evercore", "Lazard",
+               "Capital Economics", "Oxford Economics", "Bloomberg Economics", "Moody's", "Fitch",
+               "Örnek Banka")
+#: "<Name> Bank / Bankası / Securities / Capital / Markets / Research" not in BANK_ALIASES
+#: is an unknown source too, except these public institutions.
+PUBLIC_BANKS = ("merkez bankası", "central bank", "reserve bank", "world bank", "dünya bankası",
+                "yatırım bankası", "kalkınma bankası", "investment bank", "development bank",
+                "bank of england", "bank of japan", "bank of canada", "people's bank")
+_OTHER_BANKS = [re.compile(r"(?<![\w.])%s(?![\w])" % re.escape(b), 0 if b.isupper() else re.I)
+                for b in OTHER_BANKS]
+_GENERIC_BANK = re.compile(r"\b(?:[A-ZÇĞİÖŞÜ][\w&.'-]*\s+){1,3}(?:Bank|Banka|Bankası|Securities|Capital|"
+                           r"Markets|Research|Partners|Asset Management)\b")
+#: Forecast verbs said in the negative ("beklemiyor", "öngörmüyor", "does not expect"): the
+#: report's view is given positively, a negation reverses it.
+_NEGATED = re.compile(
+    r"\b(?:bekle|beklen|öngör|öngörül|gör|düşün|öner|tahmin\s+et|işaret\s+et|öngörü\s+et)"
+    r"(?:m[ıiuü]yor\w*|me[zs]\w*|ma[zs]\w*|meyecek\w*|mayacak\w*|meyeceğ\w*|mayacağ\w*|"
+    r"memekte\w*|mamakta\w*|medi\w*|madı\w*|memiş\w*|mamış\w*)"
+    r"|\b(?:do|does|did)(?:\s+not|n't)\s+(?:expect|see|forecast|anticipate|project)\w*"
+    r"|\bno\s+longer\s+(?:expect|see|forecast)\w*|\bnot\s+expected\b", re.I)
+
+
+def unknown_banks(text: str) -> list[str]:
+    """Bank / research-house names that are not one of the sources (``BANK_ALIASES``)."""
+    plain = _NS_CITE.sub(" ", SLOT.sub(" ", text or ""))
+    found = [m.group(0) for p in _OTHER_BANKS for m in p.finditer(plain)]
+    for m in _GENERIC_BANK.finditer(plain):
+        name = m.group(0)
+        if bank_mentions(name) or any(x in _tr_lower(name) for x in PUBLIC_BANKS):
+            continue
+        found.append(name)
+    return ["tanınmayan kurum adı: %s" % n for n in dict.fromkeys(found)]
+
+
+def negated_forecasts(text: str) -> list[str]:
+    """Forecast verbs in the negative (see ``_NEGATED``)."""
+    return ["olumsuz tahmin fiili: %s — raporun görüşünü olumlu fiille aktar" % m.group(0)
+            for m in _NEGATED.finditer(_tr_lower(text or ""))]
+
+
+def _topic_keys(labels) -> tuple:
+    keys = []
+    for label in labels:
+        for k in (instrument_key(label), instrument_key(label_tr(label))):
+            if len(k) >= 2 and k not in keys:
+                keys.append(k)
+    return tuple(keys)
+
+
+def topics_of(r: dict) -> tuple[tuple, str | None]:
+    """(instrument keys, display label) of a report's topic: its named instruments, else the
+    headline's "<asset class>, <country>" part."""
+    labels = [str(i).strip() for i in _summary(r).get("instruments") or () if str(i).strip()]
+    inst = _instrument(r)
+    if inst and inst[1] not in labels:
+        labels.append(inst[1])
+    return _topic_keys(labels), (label_tr(labels[0]) if labels else None)
+
+
+def claim_problems(claim: str, spec: Spec) -> list[str]:
+    """Unknown banks, negated forecast verbs, and every value / count slot bound to its
+    topic: the filled claim names the slot's own instrument (a USD/TRY number is never
+    written as the policy rate)."""
+    problems = unknown_banks(claim) + negated_forecasts(claim)
+    filled_key = instrument_key(fill_slots(claim, spec.slots))
+    for m in SLOT.finditer(claim):
+        slot = spec.slots.get("%s.%s" % m.groups())
+        if slot and slot.kind in ("value", "count") and slot.topic and not any(
+                k in filled_key for k in slot.topic):
+            problems.append("{%s} %s konusunun sayısı; cümlede bu konu yazılmamış" % (
+                slot.id, slot.topic_label or slot.topic[0]))
+    return problems
+
+
+def _values(text: str) -> list[float]:
+    return sorted(round(n.value, 6) for n in numbers(text))
+
+
+def reread(out: dict, spec: Spec) -> list[str]:
+    """The final re-read (PR #3 / PRISMA #176): fill every claim, then compare its numbers
+    1:1 with the slots it used, and each slot's numbers with the text of the source the
+    slot came from (which the claim cites). Anything else means a number was made, moved
+    or merged between the model's text and the mail."""
+    problems = []
+    for b in out.get("maddeler") or ():
+        for claim in split_claims(str(b)):
+            used = [spec.slots.get("%s.%s" % m.groups()) for m in SLOT.finditer(claim)]
+            if any(s is None for s in used):
+                problems.append("bilinmeyen yuva (%s)" % claim[:50])
+                continue
+            filled = fill_slots(claim, spec.slots)
+            expected = sorted(v for s in used for v in _values(s.display))
+            if _values(filled) != expected:
+                problems.append("doldurulan cümlenin sayıları yuvalarla bire bir tutmuyor (%s)" % filled[:60])
+            cited = _cited_ids(claim, spec)
+            for s in used:
+                source = (spec.claims.get(s.source) or spec.facts.get(s.source) or {}).get("text", "")
+                pool = numbers(source)
+                for n in numbers(s.display):
+                    if s.source not in cited or not any(
+                            abs(p.value - n.value) < 1e-9 or (p.alt is not None and abs(p.alt - n.value) < 1e-9)
+                            for p in pool):
+                        problems.append("{%s} = %s kaynağında yok (%s)" % (s.id, s.display, s.source))
+    return problems
 
 
 def split_claims(text: str) -> list[str]:
@@ -1334,6 +1457,8 @@ def write(spec: Spec, ask) -> dict:
             errors = validate(out, spec)
         except ValueError as exc:
             out, errors = None, [str(exc)]
+        if not errors:
+            errors = reread(out, spec)       # last look at the FILLED text before it is published
         if not errors:
             return {"headline": out["baslik"].strip(),
                     "bullets": [expand_claims(fill_slots(b.strip(), spec.slots), spec)

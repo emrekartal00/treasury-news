@@ -219,6 +219,65 @@ def test_a_dotted_roman_numeral_is_refused_too():
     assert _verdict("JPMorgan faizde III. indirimi bekliyor [R1].")
 
 
+@pytest.mark.parametrize("bullet", [
+    "JPMorgan USD/TRY için {R1.n1} öngörüyor [R1].",                 # R1.n1 is the policy rate
+    "Goldman Sachs politika faizi için {R2.n1} öngörüyor [R2].",      # R2.n1 is USD/TRY
+    "Kurumlar {K4.c1} kurumla ayrışıyor [K4].",                       # count without its topic
+])
+def test_a_slot_is_bound_to_its_topic(bullet):
+    assert any("konusunun sayısı" in e for e in _verdict(bullet)), bullet
+
+
+@pytest.mark.parametrize("bullet", [
+    "UBS ve JPMorgan politika faizini {R1.n1} öngörüyor [R1].",
+    "Nomura Securities politika faizinde düşüş bekliyor [R1].",
+    "Örnek Banka A politika faizinde düşüş bekliyor [R1].",
+])
+def test_unknown_bank_names_are_refused(bullet):
+    assert any("tanınmayan kurum adı" in e for e in _verdict(bullet)), bullet
+
+
+def test_central_banks_are_not_unknown_sources():
+    assert xs.unknown_banks("Merkez Bankası ve Avrupa Merkez Bankası; Bank of England") == []
+
+
+@pytest.mark.parametrize("bullet", [
+    "JPMorgan politika faizinde artış beklemiyor [R1].",
+    "JPMorgan politika faizinde artış öngörmüyor [R1].",
+    "JPMorgan politika faizinde artış beklemeyecek [R1].",
+    "JPMorgan politika faizinde indirim görmüyor [R1].",
+    "JPMorgan politika faizinde indirim tahmin etmiyor [R1].",
+])
+def test_negated_forecast_verbs_are_refused(bullet):
+    assert any("olumsuz tahmin fiili" in e for e in _verdict(bullet)), bullet
+
+
+def test_positive_forecast_verbs_pass():
+    assert xs.negated_forecasts("bekliyor, öngörüyor, beklemektedir, beklemeye devam ediyor, görüyor") == []
+
+
+def test_negation_in_the_headline_and_unknown_bank_in_the_headline_are_refused():
+    spec = xs.build_spec(_reports(), LABEL)
+    for h in ("Kurumlar indirim beklemiyor", "UBS kurda ayrışıyor"):
+        assert any(e.startswith("başlık") for e in xs.validate(dict(GOOD, baslik=h), spec)), h
+
+
+def test_the_final_re_read_compares_every_filled_number_with_its_report():
+    spec = xs.build_spec(_reports(), LABEL)
+    assert xs.reread(GOOD, spec) == []
+    bad = xs.replace(spec.slots["R1.n1"], display="%37")           # a fill that drifted
+    spec.slots["R1.n1"] = bad
+    assert any("R1.n1" in e and "kaynağında yok" in e for e in xs.reread(GOOD, spec))
+    calls = []
+    s = xs.write(spec, _ask(GOOD, calls))
+    assert s["status"] == xs.TEMPLATE and "%37" not in " ".join(s["bullets"])
+
+
+def test_the_slot_table_shows_bank_and_topic():
+    spec = xs.build_spec(_reports(), LABEL)
+    assert "{R1.n1} = %36 (JPMorgan, konu: Politika faizi)" in spec.user
+
+
 def test_ordinary_words_are_not_numbers():
     assert xs.raw_numbers("Kurumlar yarın açıklanacak veriyi izliyor; altında kalıyor [R1].") == []
 
