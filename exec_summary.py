@@ -487,6 +487,21 @@ _NS_CITE = re.compile(r"\[[A-ZÇ]+\d+\]")
 NUMBER_WORDS = tuple(w for w in list(_TR_ONES) + list(_TR_TENS) + ["yüz", "bin", "milyon", "milyar"]
                      + list(_EN_SMALL) + ["twenty", "thirty", "forty", "fifty", "hundred"]
                      if w != "bir")
+#: Number words with a Turkish ordinal / distributive / fraction suffix ("ikinci", "üçte",
+#: "onar", "binde"), counted words, fractions and English ordinals (PR #3 review: a number
+#: must never reach the mail without digits either).
+_NUM_STEMS = sorted(list(_TR_ONES) + list(_TR_TENS) + ["dörd", "yüz", "bin", "milyon", "milyar"],
+                    key=len, reverse=True)
+_NUM_SUFFIXED = re.compile(r"^(?:%s)(?:inci|ıncı|uncu|üncü|nci|ncı|ncu|ncü|de|da|te|ta|şer|şar|er|ar|"
+                           r"lerce|larca|ler|lar)$" % "|".join(_NUM_STEMS))
+NUMBER_WORDS_EXTRA = ("yarım", "yarı", "yarısı", "yarısını", "yarısına", "yarısında", "buçuk",
+                      "çift", "tek", "düzine", "onlarca", "yüzlerce", "binlerce", "milyonlarca",
+                      "half", "halves", "quarter", "quarters", "double", "twice", "triple",
+                      "dozen", "dozens", "thousand", "million", "billion", "trillion", "percent",
+                      "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth",
+                      "ninth", "tenth", "hundredth", "thousandth")
+NUMBER_PREFIXES = ("çeyrek", "yarıyıl", "buçuk", "düzine", "quarter")
+_ROMAN = re.compile(r"(?<![\w])(?=[MDCLXVI])M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})(?![\w])")
 _TENOR_EN = re.compile(r"(\d{1,3})\s?-?\s?(y|yr|yrs|years?|m|months?|w|weeks?|d|days?)$", re.I)
 _TENOR_TR = {"y": "yıllık", "m": "aylık", "w": "haftalık", "d": "günlük"}
 _UNIT_TAIL_TR = re.compile(r"^(\s*(?:(?:milyar|milyon|bin)\s+)?(?:TL|USD|EUR|ABD doları|baz puan|puan)\b)")
@@ -657,14 +672,64 @@ def _tr_lower(text: str) -> str:
 
 
 def raw_numbers(text: str) -> list[str]:
-    """Digits or number words the model wrote itself (outside slot ids and citations)."""
-    plain = _tr_lower(_plain(text))
+    """Numbers the model wrote itself (outside slot ids and citations): digits, any other
+    Unicode number character (superscripts, fractions, other scripts, Roman numeral signs),
+    number words incl. ordinals / fractions ("ikinci", "üçte", "çeyrek", "yarım", "first"),
+    and Roman numerals ("III")."""
+    raw = _plain(text)
+    plain = _tr_lower(raw)
     found = re.findall(r"\d+(?:[.,]\d+)*", plain)
-    words = re.findall(r"[^\W\d_]+", plain)
-    found += [w for w in words if w in NUMBER_WORDS]
-    if re.search(r"\byüzde\b", plain):
-        found.append("yüzde")
+    found += [ch for ch in raw if not ch.isdigit() and unicodedata.numeric(ch, None) is not None]
+    found += [ch for ch in raw if ch.isdigit() and not ch.isascii() and not re.match(r"\d", ch)]
+    for w in re.findall(r"[^\W\d_]+", plain):
+        if (w in NUMBER_WORDS or w in NUMBER_WORDS_EXTRA or _NUM_SUFFIXED.match(w)
+                or w.startswith(NUMBER_PREFIXES) or w.startswith("yüzde")):
+            found.append(w)
+    found += [m.group(0) for m in _ROMAN.finditer(raw) if m.group(0)]
     return found
+
+
+#: Units, signs and scale words the slot already renders (PR #3 review): never written next
+#: to a slot by the model - "{R1.n1} baz puan", "%{R1.n1}", "eksi {R1.n1}", "{R1.n1} kat".
+UNIT_CHARS = "%‰$€£₺¥+-−–—±×/"
+UNIT_WORDS = ("baz", "bp", "bps", "bin", "mn", "bn", "tn", "tl", "x", "percent", "pct", "percentage",
+              "point", "points", "basis", "euro", "sent", "kat", "katı", "katına", "katını",
+              "katında", "katlık", "katlı", "misli", "eksi", "artı", "minus", "plus", "negatif",
+              "pozitif")
+UNIT_PREFIXES = ("puan", "yüzde", "milyon", "milyar", "trilyon", "lira", "dolar", "avro", "kuruş",
+                 "binde", "mislin")
+_SUFFIX = re.compile(r"^'[^\W\d_]+")
+
+
+def _unit_word(word: str) -> bool:
+    w = _tr_lower(word)
+    return w in UNIT_WORDS or w.startswith(UNIT_PREFIXES)
+
+
+def adjacent_problems(sentence: str) -> list[str]:
+    """A unit, sign, scale word or another slot written right next to a slot."""
+    text = _NS_CITE.sub(lambda m: " " * len(m.group(0)), sentence or "")
+    slots = list(SLOT.finditer(text))
+    problems = []
+    for k, m in enumerate(slots):
+        sid = "{%s.%s}" % m.groups()
+        after = text[m.end():]
+        suffix = _SUFFIX.match(after)
+        after = after[suffix.end():] if suffix else after
+        before = text[:m.start()]
+        if k + 1 < len(slots) and not re.search(r"[^\W\d_]", text[m.end():slots[k + 1].start()]):
+            problems.append("iki yuva yan yana: %s ve {%s.%s} — arasına söz yaz ('ile', 've')"
+                            % (sid, *slots[k + 1].groups()))
+        nxt, prv = after.lstrip(), before.rstrip()
+        if (nxt[:1] and nxt[0] in UNIT_CHARS) or (prv[-1:] and prv[-1] in UNIT_CHARS):
+            problems.append("yuvanın yanında birim ya da işaret var: %s — birimi yuva kendisi yazar" % sid)
+            continue
+        w_after = re.match(r"[^\W\d_]+", nxt)
+        w_before = re.search(r"([^\W\d_]+)\W*$", prv)
+        if (w_after and _unit_word(w_after.group(0))) or (
+                w_before and before[w_before.end(1):].strip() == "" and _unit_word(w_before.group(1))):
+            problems.append("yuvanın yanında birim sözcüğü var: %s — birimi yuva kendisi yazar" % sid)
+    return problems
 
 
 def check_slots(sentence: str, slots: dict, cited: set, owners: set, require_bank: bool = False) -> list[str]:
@@ -673,6 +738,7 @@ def check_slots(sentence: str, slots: dict, cited: set, owners: set, require_ban
     ``owners`` the canonical banks of the cited sources; ``require_bank``: a bank's value
     must always have its bank named next to it (slide 1: per-bank numbers keep their bank)."""
     problems = ["kendi yazdığın sayı: %s — yalnız {…} yuvalarını kullan" % x for x in raw_numbers(sentence)]
+    problems += adjacent_problems(sentence)
     used = [(m.start(), m.end(), "%s.%s" % (m.group(1), m.group(2))) for m in SLOT.finditer(sentence)]
     for _, _, sid in used:
         if sid not in slots:
@@ -752,7 +818,7 @@ KEY_POINTS_PER_REPORT = 2
 #: Primary subjects that never enter the summary (treasury-report's rule; treasury-news
 #: summaries carry no ``subjects`` yet, so today this only acts if that field appears).
 DROP_SUBJECTS = ("equity", "non_research")
-PROMPT_VER = "rs-5"
+PROMPT_VER = "rs-5-tn2"     # rs-5 + PR #3 review: no units/signs at slots, no ":" / line breaks
 NAME = "Araştırma özeti"
 TEMPLATE_HEADLINE = "Kurumların bugünkü görüşleri"
 
@@ -810,14 +876,14 @@ SYSTEM = """Sen bir hazine biriminin günlük araştırma bülteninin yazarısı
 
 Kurallar:
 1. Yalnızca verilen olguları kullan. Olgularda olmayan bilgi ya da yorum ekleme.
-2. HİÇBİR RAKAMI ya da sayı sözcüğünü kendin yazma. Olgulardaki her sayı, tarih, vade ve rakamlı ad süslü parantezli bir YUVADIR, örneğin {R3.n1}; sayıya ihtiyacın varsa yuvayı aynen yaz ({R3.n1}), değerini kod yerleştirir. Yuva tablosu her yuvanın değerini ve kurumunu gösterir. Bir yuvayı kullandığın cümle, yuvanın raporuna atıf yapar ({R3.n1} → [R3]). Bir kurumun yuvasını o kurumun adının yanında yaz; iki kurumu "A ve B" diye yazarsan yuvaları da aynı sırayla yaz. Yuvanın yönünü değiştirme (indirim yuvası "artış" olmaz). Bir cümlede en fazla 2 değer yuvası olsun. Bir kurumun adını yalnız o kurumun raporuna atıf yapıyorsan yaz.
-3. Her cümlenin sonuna dayandığı raporların numaralarını köşeli parantezle yaz, örneğin [R2] ya da [R3][R7][R12]. Atıfsız cümle yazma; bir maddede iki cümle varsa ikisi de atıf taşır.
+2. HİÇBİR RAKAMI ya da sayı sözcüğünü kendin yazma. Olgulardaki her sayı, tarih, vade ve rakamlı ad süslü parantezli bir YUVADIR, örneğin {R3.n1}; sayıya ihtiyacın varsa yuvayı aynen yaz ({R3.n1}), değerini kod yerleştirir. Yuva tablosu her yuvanın değerini ve kurumunu gösterir. Bir yuvayı kullandığın cümle, yuvanın raporuna atıf yapar ({R3.n1} → [R3]). Bir kurumun yuvasını o kurumun adının yanında yaz; iki kurumu "A ve B" diye yazarsan yuvaları da aynı sırayla yaz. Yuvanın yönünü değiştirme (indirim yuvası "artış" olmaz). Bir cümlede en fazla 2 değer yuvası olsun. Bir kurumun adını yalnız o kurumun raporuna atıf yapıyorsan yaz. Yuvanın yanına birim, işaret ya da ölçek YAZMA (%, eksi, artı, "baz puan", "puan", "kat", "milyar", "TL" yasak): yuva değeri birimiyle birlikte kendisi yazar. İki yuvayı yan yana ya da yalnız tire/virgülle yazma; aralık için "{R5.n1} ile {R5.n2} arasında" yaz. "Çeyrek", "yarım", "ikinci", "üçte bir" gibi sayı sözcükleri ve Roma rakamları da yazma.
+3. Her cümlenin sonuna dayandığı raporların numaralarını köşeli parantezle yaz, örneğin [R2] ya da [R3][R7][R12]. Atıfsız cümle yazma; bir maddede iki cümle varsa ikisi de atıf taşır. İki nokta (:) ve satır sonu kullanma.
 4. Özet bütün raporları saymak zorunda değildir; günün genel resmini ver. Aynı görüşteki raporları TEK maddede topla ve hepsine atıf yap (örneğin "USD/TRY için yıl sonu beklentisi {R3.n1} ile {R7.n1} arasında [R3][R7]."); ayrışan görüşü ayrı bir maddede, kendi atfıyla yaz.
 4a. [K] olguları bir enstrüman için bir görüşü taşıyan kurumları ve raporlarını söyler; [K] numarası o raporların yerine geçer. Kurum sayısını [K] yuvasıyla yaz ("{K1.c1} kurum").
 5. Bir kurumun görüşünü kurumun adıyla ve kurumun fiiliyle yaz ("öngörüyor", "bekliyor", "öneriyor"); görüşü kendi ağzından yazma, "piyasa bekliyor" diye genelleme.
 6. Neden-sonuç kurma ("çünkü", "nedeniyle", "sayesinde" yasak). Yatırım tavsiyesi verme; "fırsat", "cazip", "alınmalı" gibi sözler yazma. "Rekor", "ilk kez", "en yüksek" yazma.
 7. {count} madde yaz. Önemli olanı önce yaz: önce birden çok kurumun yazdığı konular, uzlaşı ve ayrışma. Her madde tek fikirli, en fazla 25 kelimelik bir cümledir. Aynı konuyu iki maddede tekrarlama.
-8. Başlık en fazla 8 kelime olsun, hiçbir sayı içermesin ve günün ana mesajını yansıtsın.
+8. Başlık en fazla 8 kelime olsun, hiçbir sayı ve kurum adı içermesin ve günün ana mesajını yansıtsın.
 9. Olgular İngilizce olabilir; sen yalnız Türkçe yaz. Rakamsız enstrüman adlarını (EUR/USD gibi) olduğu gibi bırak; rakamlı adlar da yuvadır.
 10. Yanıtı yalnızca şu JSON biçiminde ver: {{"baslik": "...", "maddeler": ["...", "..."]}}. Metni Türkçe karakterlerle (ç, ğ, ı, İ, ö, ş, ü) yaz."""
 
@@ -1093,13 +1159,17 @@ def validate(out, spec: Spec) -> list[str]:
         errors.append("başlık %d kelimeden uzun" % HEADLINE_MAX_WORDS)
     elif raw_numbers(headline) or SLOT.search(headline):
         errors.append("başlıkta sayı var")
+    if headline:                     # the same word / number / bank checks as a bullet (PR #3)
+        errors += ["başlık: %s" % p for p in check_slots(headline, spec.slots, set(), set())
+                   if not p.startswith("kendi yazdığın sayı")]
+        errors += ["başlık: %s" % p for p in check_sentence(mask_digits(headline), {}, {}, limits=False)]
     lo, hi = spec.n_bullets
     if not lo <= len(bullets) <= hi:
         errors.append("%d madde yazıldı (%d–%d olmalı)" % (len(bullets), lo, hi))
     if len(set(bullets)) != len(bullets):
         errors.append("aynı madde iki kez yazıldı")
     for b in bullets:
-        sentences = split_sentences(b)
+        sentences = split_claims(b)
         uncited = [x for x in sentences if not _CITE.search(x)]
         if uncited or not sentences:
             errors.append("atıfsız cümle: %s" % (uncited[0] if uncited else b)[:60])
@@ -1153,6 +1223,21 @@ def check_numbers(sentence: str, spec: Spec) -> list[str]:
     return check_slots(sentence, spec.slots, cited, owners)
 
 
+
+
+def split_claims(text: str) -> list[str]:
+    """The claims of a model bullet: its sentences, each also cut at a line break or a colon
+    (PR #3 review: "A: B [R2]" or "A\nB [R2]" would put two claims under one citation)."""
+    out = []
+    for line in re.split(r"[\r\n]+", text or ""):
+        for sentence in split_sentences(line):
+            out += [x.strip() for x in re.split(r":(?![^{]*\})", sentence) if x.strip()]
+    return out
+
+
+def expand_claims(text: str, spec: Spec) -> str:
+    """``expand`` for a verified model bullet: claim by claim (see ``split_claims``)."""
+    return " ".join(_expand_one(x, spec) for x in split_claims(text))
 
 
 def expand(text: str, spec: Spec) -> str:
@@ -1251,7 +1336,7 @@ def write(spec: Spec, ask) -> dict:
             out, errors = None, [str(exc)]
         if not errors:
             return {"headline": out["baslik"].strip(),
-                    "bullets": [expand(fill_slots(b.strip(), spec.slots), spec)
+                    "bullets": [expand_claims(fill_slots(b.strip(), spec.slots), spec)
                                 for b in out["maddeler"] if b.strip()],
                     "status": VERIFIED, "attempts": calls, "errors": []}
         if errors[0].startswith("metinde hiç Türkçe") and not tr_retry:

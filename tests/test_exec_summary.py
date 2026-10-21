@@ -61,11 +61,11 @@ MAIL_IDS = ["SYN-R2", "SYN-R1", "SYN-R4", "SYN-R3"]          # the mail's order 
 DIGEST_IDS = ["SYN-R1", "SYN-R2", "SYN-R3", "SYN-R4", "SYN-R5", "SYN-R6", "SYN-R7", "SYN-R8"]
 
 GOOD = {"baslik": "Kurumlar kurda ayrışıyor, faizde birleşiyor", "maddeler": [
-    "USD/TRY için {K1.c2} kurum ayrışıyor: Goldman Sachs yükseliş, Citi düşüş, Barclays yatay "
-    "görüş bildiriyor [R2][R4][R6][K1].",
+    "USD/TRY için {K1.c2} kurum ayrışıyor ve Goldman Sachs yükseliş, Citi düşüş, Barclays yatay "
+    "seyir bekliyor [R2][R4][R6][K1].",
     "JPMorgan ve Morgan Stanley yıl sonu politika faizini {R1.n1} ve {R3.n1} öngörüyor [K4].",
     "Goldman Sachs {R2.l1} USD/TRY tahminini {R2.n1} olarak yükseltti [R2].",
-    "Deutsche Bank {R5.l1} getirisinin {R5.n1}–{R5.n2} aralığında kalacağını öngörüyor [R5]."]}
+    "Deutsche Bank {R5.l1} getirisinin {R5.n1} ile {R5.n2} arasında kalacağını öngörüyor [R5]."]}
 
 
 def mail_reports():
@@ -156,7 +156,7 @@ def test_verified_answer_is_filled_from_the_reports_and_shows_only_report_citati
     assert s["bullets"][0].endswith("[R2][R4][R6].")    # [K1] expanded, repeats collapsed
     assert s["bullets"][1] == ("JPMorgan ve Morgan Stanley yıl sonu politika faizini %36 ve %35 "
                                "öngörüyor [R1][R3].")      # one claim, several reports
-    assert "UST 10Y getirisinin %4,10–%4,40" in s["bullets"][3]
+    assert "UST 10Y getirisinin %4,10 ile %4,40 arasında" in s["bullets"][3]
     assert not any("[K" in b or "{" in b for b in s["bullets"])
     assert [r["id"] for r in s["refs"]] == ["R1", "R2", "R3", "R4", "R5", "R6"]
     assert s["refs"][0]["report_id"] == "SYN-R2"
@@ -177,6 +177,72 @@ def test_a_swapped_or_foreign_slot_never_reaches_verified():
                 "Barclays {R2.n1} görüyor [R2][R6].", "Goldman Sachs {R2.n1} görüyor [R4]."):
         s = xs.summarize(_reports(), _ask(dict(GOOD, maddeler=GOOD["maddeler"][:3] + [bad])), LABEL)
         assert s["status"] == xs.TEMPLATE, bad
+
+
+def _verdict(bullet):
+    return xs.validate(dict(GOOD, maddeler=GOOD["maddeler"][:3] + [bullet]), xs.build_spec(_reports(), LABEL))
+
+
+@pytest.mark.parametrize("bullet", [
+    "JPMorgan politika faizini %{R1.n1} öngörüyor [R1].",
+    "JPMorgan politika faizini {R1.n1}% öngörüyor [R1].",
+    "JPMorgan politika faizini -{R1.n1} öngörüyor [R1].",
+    "JPMorgan politika faizini eksi {R1.n1} öngörüyor [R1].",
+    "JPMorgan aralıkta {R1.n2} baz puan indirim bekliyor [R1].",
+    "JPMorgan aralıkta {R1.n2}'lik baz puan indirim bekliyor [R1].",
+    "JPMorgan politika faizini {R1.n1} kat öngörüyor [R1].",
+    "JPMorgan politika faizini {R1.n1} milyar öngörüyor [R1].",
+    "JPMorgan politika faizini {R1.n1}{R1.n2} öngörüyor [R1].",
+    "Deutsche Bank getirinin {R5.n1}–{R5.n2} aralığında kalacağını öngörüyor [R5].",
+    "Deutsche Bank getirinin {R5.n1}, {R5.n2} aralığında kalacağını öngörüyor [R5].",
+])
+def test_no_unit_sign_or_second_slot_next_to_a_slot(bullet):
+    assert any("yuva" in e and ("yanında" in e or "yan yana" in e) for e in _verdict(bullet)), bullet
+
+
+@pytest.mark.parametrize("bullet,word", [
+    ("JPMorgan ikinci çeyrekte indirim bekliyor [R1].", "ikinci"),
+    ("JPMorgan son çeyrekte indirim bekliyor [R1].", "çeyrekte"),
+    ("JPMorgan yarım puan indirim bekliyor [R1].", "yarım"),
+    ("JPMorgan faizin üçte bir oranında düşeceğini öngörüyor [R1].", "üçte"),
+    ("JPMorgan faizde III indirimi bekliyor [R1].", "III"),
+    ("JPMorgan faizde Ⅲ indirim bekliyor [R1].", "Ⅲ"),
+    ("JPMorgan faizi %³⁶ öngörüyor [R1].", "³"),
+    ("JPMorgan faizde ½ puan indirim bekliyor [R1].", "½"),
+    ("JPMorgan faizde twice indirim bekliyor [R1].", "twice"),
+])
+def test_numbers_without_digits_are_refused(bullet, word):
+    assert any("kendi yazdığın sayı: %s" % word in e for e in _verdict(bullet)), bullet
+
+
+def test_a_dotted_roman_numeral_is_refused_too():
+    assert _verdict("JPMorgan faizde III. indirimi bekliyor [R1].")
+
+
+def test_ordinary_words_are_not_numbers():
+    assert xs.raw_numbers("Kurumlar yarın açıklanacak veriyi izliyor; altında kalıyor [R1].") == []
+
+
+@pytest.mark.parametrize("bullet", [
+    "JPMorgan indirim bekliyor: Goldman Sachs yükseliş bekliyor [R1][R2].",
+    "JPMorgan indirim bekliyor\nGoldman Sachs yükseliş bekliyor [R1][R2].",
+])
+def test_a_colon_or_line_break_starts_a_claim_that_needs_its_own_citation(bullet):
+    assert any("atıfsız cümle" in e for e in _verdict(bullet)), bullet
+
+
+def test_cited_claims_on_both_sides_of_a_colon_pass_and_keep_their_own_citations():
+    bullet = "JPMorgan indirim bekliyor [R1]: Goldman Sachs yükseliş bekliyor [R2]."
+    assert _verdict(bullet) == []
+    s = xs.summarize(_reports(), _ask(dict(GOOD, maddeler=GOOD["maddeler"][:3] + [bullet])), LABEL)
+    assert s["bullets"][3] == "JPMorgan indirim bekliyor [R1]. Goldman Sachs yükseliş bekliyor [R2]."
+
+
+@pytest.mark.parametrize("headline", ["Goldman Sachs kurda yükseliş bekliyor", "Faizde rekor indirim",
+                                      "Faizde ikinci indirim", "Bu fırsat kaçmaz", "İndirim bekleniyor"])
+def test_the_headline_gets_the_same_word_number_and_bank_checks(headline):
+    spec = xs.build_spec(_reports(), LABEL)
+    assert any(e.startswith("başlık") for e in xs.validate(dict(GOOD, baslik=headline), spec)), headline
 
 
 def test_every_sentence_needs_a_citation_and_the_headline_no_number():
@@ -354,3 +420,58 @@ def test_load_report_carries_the_banks_report_types():
                     b'["Equities", "Europe"]')
     r = mailer.load_report(Cur(), "X1")
     assert r["report_types"] == ["Equities", "Europe"] and xs.is_equity(r)
+
+
+def _office_day(monkeypatch, sent=None, logged=None):
+    class Con(_FakeCon):
+        def commit(self):
+            pass
+    monkeypatch.setattr(mailer.db_conn, "connect", lambda: Con())
+    monkeypatch.setattr(mailer, "db_today", lambda cur: DAY)
+    monkeypatch.setattr(mailer, "already_sent", lambda cur, d: False)
+    monkeypatch.setattr(mailer, "load_digest", lambda cur, d: (_overview(), DIGEST_IDS))
+    monkeypatch.setattr(mailer, "load_report", lambda cur, rid: dict(REPORTS[rid]))
+    monkeypatch.setattr(mailer.curate, "select", lambda reports: [r for r in mail_reports()])
+    monkeypatch.setattr(mailer.ai, "chat", lambda s, u, **k: (json.dumps(GOOD, ensure_ascii=False), "stop"))
+    monkeypatch.setattr(mailer, "send", lambda subject, html, preview=False: sent.append(html) or "outlook")
+    monkeypatch.setattr(mailer, "log_email", lambda cur, row, ids: logged.append((row["status"], ids)))
+    monkeypatch.setattr(sys, "argv", ["mailer.py"])
+
+
+def test_dry_run_never_stops_the_real_mail_inside_the_pipeline(tmp_path, monkeypatch):
+    sent, logged = [], []
+    out = tmp_path / "dry.html"
+    _office_day(monkeypatch, sent, logged)
+    monkeypatch.setattr(mailer, "EXEC_SUMMARY_DRY_RUN", True)
+    monkeypatch.setattr(mailer, "DRY_RUN_FILE", out)
+    monkeypatch.setenv(mailer.PIPELINE_ENV, "1")
+    mailer.main()
+    assert len(sent) == 1 and logged == [("SENT", MAIL_IDS)] and not out.exists()
+    assert "GÜNÜN ARAŞTIRMA ÖZETİ" not in sent[0]           # EXEC_SUMMARY itself is still off
+
+
+def test_the_pipeline_marks_the_mail_stage(monkeypatch):
+    import pipeline
+    seen = []
+    monkeypatch.setattr(pipeline.subprocess, "run",
+                        lambda cmd, env=None, **k: seen.append((cmd, env)) or type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(sys, "argv", ["pipeline.py", "--only", "mail"])
+    pipeline.main()
+    assert seen[0][0][-1] == "mailer.py" and seen[0][1][mailer.PIPELINE_ENV] == "1"
+
+
+def test_a_missing_exec_summary_module_mails_without_the_summary(monkeypatch):
+    sent, logged = [], []
+    _office_day(monkeypatch, sent, logged)
+    monkeypatch.setattr(mailer, "EXEC_SUMMARY", True)
+    monkeypatch.setitem(sys.modules, "exec_summary", None)       # "import exec_summary" fails
+    mailer.main()
+    assert len(sent) == 1 and "GÜNÜN ARAŞTIRMA ÖZETİ" not in sent[0] and logged[0][0] == "SENT"
+
+
+def test_the_summary_goes_into_the_real_mail_when_switched_on(monkeypatch):
+    sent, logged = [], []
+    _office_day(monkeypatch, sent, logged)
+    monkeypatch.setattr(mailer, "EXEC_SUMMARY", True)
+    mailer.main()
+    assert "GÜNÜN ARAŞTIRMA ÖZETİ" in sent[0] and logged == [("SENT", MAIL_IDS)]

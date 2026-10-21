@@ -107,7 +107,9 @@ def main():
         if name == "summarize":
             run_summarize()
             continue
-        rc = subprocess.run([sys.executable, script]).returncode
+        # mailer.py's EXEC_SUMMARY_DRY_RUN acts only on a hand run, never here.
+        env = dict(os.environ, TREASURY_NEWS_PIPELINE="1")
+        rc = subprocess.run([sys.executable, script], env=env).returncode
         if rc != 0:
             print(f"[STOP] stage '{name}' exited with code {rc}")
             sys.exit(rc)

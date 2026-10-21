@@ -24,7 +24,11 @@ without it. Switches below (hand-edited, default OFF):
   EXEC_SUMMARY = True          the summary goes into the real mail;
   EXEC_SUMMARY_DRY_RUN = True  the mail WITH the summary is written to
                                state/exec_summary_dry_run.html; nothing is sent, nothing is
-                               logged, and an already-sent day can be dry-run again.
+                               logged, and an already-sent day can be dry-run again. It acts
+                               ONLY when mailer.py is run by hand (F5 / its own main()): inside
+                               pipeline.py (which sets PIPELINE_ENV) it is ignored and the real
+                               mail goes out as usual.
+exec_summary.py is imported lazily: if it is missing or broken, the mail goes without it.
 
 Run:  python mailer.py [--date YYYY-MM-DD] [--force] [--preview]
   --preview opens the mail in Outlook for review instead of sending.
@@ -43,7 +47,6 @@ import oracledb
 import ai
 import curate
 import db_conn
-import exec_summary as xs
 
 # ═══════════════════════════════════════════════ CONFIG (edit by hand)
 EXEC_SUMMARY = False            # True: the Turkish executive summary goes on top of the mail
@@ -52,6 +55,19 @@ EXEC_SUMMARY_TIMEOUT = 120      # seconds for the whole summary (every model cal
 # ════════════════════════════════════════════════════════════════════════
 
 DRY_RUN_FILE = Path(__file__).parent / "state" / "exec_summary_dry_run.html"
+#: pipeline.py sets this in the mail stage's environment: the dry run never acts there.
+PIPELINE_ENV = "TREASURY_NEWS_PIPELINE"
+
+
+def _exec_summary():
+    """exec_summary.py, or None when it is missing or fails to import (logged) - the mail
+    then goes out without the summary."""
+    try:
+        import exec_summary
+        return exec_summary
+    except Exception as exc:                     # noqa: BLE001 - never stops the mail
+        print(f"[summary] exec_summary.py not usable ({exc}); mailing without the summary.")
+        return None
 
 
 def db_today(cur):
@@ -262,6 +278,9 @@ def build_summary(sent, all_reports, date_str, base_url="", ask=None, timeout=No
     """The executive summary dict (exec_summary.summarize + "rnum"/"href"), or None: no
     usable report, an error, or the time limit - the mail then goes out without it.
     ``sent`` = the mail's reports (mail order), ``all_reports`` = the day's digest."""
+    xs = _exec_summary()
+    if xs is None:
+        return None
     timeout = EXEC_SUMMARY_TIMEOUT if timeout is None else timeout
     deadline = time.monotonic() + timeout
     state = {}
@@ -313,6 +332,9 @@ def render(overview, reports, base_url, summary=None):
     def href(rid):
         return hrefs.get(rid) or report_href(rid, base_url)
 
+    xs = _exec_summary() if summary else None
+    if xs is None:
+        summary = None
     rnum = (summary or {}).get("rnum") or {}
     cards = []
     if summary:
@@ -421,7 +443,10 @@ def main():
     cur = con.cursor()
     date_str = args.date or db_today(cur)
 
-    if not args.force and not EXEC_SUMMARY_DRY_RUN and already_sent(cur, date_str):
+    dry_run = EXEC_SUMMARY_DRY_RUN and not os.environ.get(PIPELINE_ENV)
+    if EXEC_SUMMARY_DRY_RUN and not dry_run:
+        print("[dry run] EXEC_SUMMARY_DRY_RUN is ignored inside the pipeline; sending as usual.")
+    if not args.force and not dry_run and already_sent(cur, date_str):
         print(f"Email already SENT for {date_str}; skipping (use --force).")
         con.close()
         return
@@ -449,14 +474,14 @@ def main():
     base = os.environ.get("WEBAPP_BASE_URL", "").rstrip("/")
     subject = f"Daily Research Digest - {date_str} - {len(reports)} report(s)"
     summary = None
-    if EXEC_SUMMARY or EXEC_SUMMARY_DRY_RUN:
+    if EXEC_SUMMARY or dry_run:
         summary = build_summary(reports, all_reports, date_str, base)
         if summary:
             print(f"[summary] {summary['status']}: {len(summary['bullets'])} bullet(s) over "
                   f"{len(summary['refs'])} cited report(s).")
     html, text = render(overview, reports, base, summary)
 
-    if EXEC_SUMMARY_DRY_RUN:
+    if dry_run:
         DRY_RUN_FILE.parent.mkdir(parents=True, exist_ok=True)
         DRY_RUN_FILE.write_text(html, encoding="utf-8")
         print(f"[dry run] mail for {date_str} written to {DRY_RUN_FILE} - nothing sent, nothing logged.")
